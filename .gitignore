@@ -1,0 +1,12 @@
+HANDOFF.md
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+coverage.xml
+dist/
+build/
+.Trash-*/
+.claude/codeatlas/
+.claude-plugin/marketplace.json

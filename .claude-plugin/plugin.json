@@ -1,0 +1,11 @@
+{
+  "name": "codeatlas",
+  "version": "0.2.0",
+  "description": "SQLite-backed codebase knowledge graph for Claude Code — incremental static analysis, AI narratives, and markdown maps",
+  "author": {
+    "name": "B&E DeZign",
+    "email": "claude@8e.lv"
+  },
+  "license": "Apache-2.0",
+  "keywords": ["codebase", "knowledge-graph", "sqlite", "static-analysis"]
+}

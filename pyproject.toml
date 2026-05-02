@@ -1,0 +1,60 @@
+[project]
+name = "codeatlas"
+version = "0.2.0"
+description = "SQLite-backed codebase knowledge graph for Claude Code"
+requires-python = ">=3.12"
+dependencies = [
+    "pyan3",
+    "grimp",
+    "vulture",
+    # ctags is a system-level prerequisite invoked via subprocess; install with
+    # your package manager (e.g. `apt install universal-ctags`).
+]
+license = "Apache-2.0"
+readme = "README.md"
+authors = [{ name = "Steve Guns", email = "claude@8e.lv" }]
+keywords = ["claude", "claude-code", "codebase", "knowledge-graph", "sqlite"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Intended Audience :: Developers",
+]
+
+[project.urls]
+Repository = "https://github.com/bedezign/codeatlas"
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov"]
+
+[project.scripts]
+explore-codebase = "codeatlas.explore_codebase.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["src/codeatlas"]
+branch = true
+relative_files = true
+omit = ["*/__init__.py"]
+
+[tool.coverage.xml]
+output = "coverage.xml"
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
