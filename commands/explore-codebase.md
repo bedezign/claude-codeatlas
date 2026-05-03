@@ -33,21 +33,19 @@ Run the workflow when:
 
 Run from the project root in this order:
 
-1. **`explore-codebase init`** — initialises the SQLite DB at `.claude/codeatlas/codebase.db`, hashes source files, reconciles against `git diff`, and emits a JSON changeset (`new`, `changed`, `deleted`) on stdout.
+1. **`explore-codebase init | explore-codebase analyze`** — hashes source files, reconciles against `git diff`, pipes the JSON changeset into `analyze`. Static analysers (ctags, pyan3, grimp, vulture) populate the `files`, `symbols`, `edges`, and `dead_code` tables. `analyze` reads the JSON from stdin when no `--changed/--new/--deleted` flags are passed.
 
-2. **`explore-codebase init | explore-codebase analyze`** — pipe the changeset directly into `analyze`. Static analysers (ctags, pyan3, grimp, vulture) populate the `files`, `symbols`, `edges`, and `dead_code` tables. Run `init` and `analyze` in a single piped command — `analyze` reads the JSON from stdin when no `--changed/--new/--deleted` flags are passed.
+2. **`explore-codebase render`** — DB → markdown. **Maps are only produced by this step — they do not appear from `init` or `analyze` alone.** Writes every map under `.claude/codeatlas/maps/` and per-module pages under `.claude/codeatlas/context/`. Pass `--base-sha <sha>` to populate `impact.md` (BFS from changed files); pass `--since <ref-or-date>` to populate `recent-changes.md`. Without those flags both files become placeholders.
 
-3. **AI narrative loop** — see next section. After `analyze` populates the structural data, you generate prose for the documented topics.
+3. **AI narrative loop** — see next section. After an initial render shows the structural data, you write prose for the documented topics, then call `render` again to incorporate them.
 
-4. **`explore-codebase render`** — DB → markdown. Writes every map under `.claude/codeatlas/maps/` and per-module pages under `.claude/codeatlas/context/`. Pass `--base-sha <sha>` to populate `impact.md` (BFS from changed files); pass `--since <ref-or-date>` to populate `recent-changes.md`. Without those flags both files become placeholders.
+4. **`explore-codebase cleanup`** — removes orphan map files (anything in `maps/` or `context/` that wasn't produced by the run). `--dry-run` lists what would go without deleting.
 
-5. **`explore-codebase cleanup`** — removes orphan map files (anything in `maps/` or `context/` that wasn't produced by the run). `--dry-run` lists what would go without deleting.
-
-6. **Activation check** — after cleanup, check whether a `codeatlas-index.md` rule already exists at `.claude/rules/codeatlas-index.md` (project-level) or `~/.claude/rules/codeatlas-index.md` (global). If neither is present, offer to activate — see *Activate mode* below.
+5. **Activation check** — after cleanup, check whether a `codeatlas-index.md` rule already exists at `.claude/rules/codeatlas-index.md` (project-level) or `~/.claude/rules/codeatlas-index.md` (global). If neither is present, offer to activate — see *Activate mode* below.
 
 ## AI narrative loop
 
-`analyze` fills the structural tables. Prose explanation per topic is your job. The loop is reactive: render first, identify gaps, fill them, re-render.
+`analyze` fills the structural tables. `render` (step 2) writes the initial maps from structural data only — no prose yet. Prose explanation per topic is your job. Review the rendered maps, identify gaps, write narratives, then call `render` again to incorporate them.
 
 For each topic below, decide whether prose is warranted given the codebase, write the narrative to a temp file, then call `narrative` to store it:
 

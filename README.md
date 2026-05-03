@@ -52,8 +52,8 @@ Claude orchestrates the full pipeline automatically:
 
 - **init** — Hash source files, detect changes since the last run, emit a JSON changeset
 - **analyze** — Run static analysers (ctags, pyan3, grimp, vulture) and populate the database
-- **narrative loop** — Claude writes prose explanations for architecture, modules, and other topics
-- **render** — Write all maps under .claude/codeatlas/maps/ and per-module pages under .claude/codeatlas/context/
+- **render** — Write all maps under .claude/codeatlas/maps/ and per-module pages under .claude/codeatlas/context/ (maps only appear after this step)
+- **narrative loop** — Claude writes prose explanations for architecture, modules, and other topics, then re-renders to incorporate them
 - **cleanup** — Remove orphan map files from previous runs
 
 All output is stored under .claude/codeatlas/.

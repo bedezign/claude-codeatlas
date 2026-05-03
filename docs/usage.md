@@ -18,8 +18,8 @@ Claude orchestrates the entire workflow automatically:
 
 1. **Init** — hashes source files and detects what's new or changed
 2. **Analyze** — pipes the changeset into static analysers (ctags, pyan3, grimp, vulture) to extract symbols, edges, and dead code
-3. **Narrative loop** — Claude identifies gaps in the structural maps and asks you to write prose explanations for key topics like architecture, data models, and APIs
-4. **Render** — builds eleven markdown maps from the database: architecture, modules, symbols, call graph, imports, dead code, plus placeholder maps for blast radius and recent changes
+3. **Render** — builds eleven markdown maps from the database: architecture, modules, symbols, call graph, imports, dead code, plus placeholder maps for blast radius and recent changes. Maps only appear after this step — `init` and `analyze` alone produce no map files.
+4. **Narrative loop** — Claude reviews the rendered maps, writes prose explanations for key topics like architecture, data models, and APIs, then re-renders to incorporate them
 5. **Cleanup** — removes orphan map files from previous runs
 6. **Activation prompt** — asks whether to write a rule so future sessions use the explore-codebase skill to query the database
 
