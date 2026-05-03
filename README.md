@@ -2,6 +2,10 @@ codeatlas
 
 *SQLite-backed codebase knowledge graph for Claude Code.*
 
+<div align="center">
+  <img src="docs/images/logo.svg" alt="codeatlas" width="200">
+</div>
+
 ## What it does
 
 codeatlas runs incremental static analysis over your source tree — hashing files, extracting symbols and call edges, detecting dead code — and stores the results in a local SQLite database. Between runs, Claude writes prose narratives that explain what the structure means. Claude queries this database directly via the explore-codebase skill to answer questions about structure, dependencies, and blast radius — without reading source files cold. The `render` step produces markdown maps on demand for human review.
@@ -21,10 +25,10 @@ Note: pyan3, grimp, and vulture are installed automatically by the plugin bootst
 
 ## Install — Claude Code plugin (recommended)
 
-From inside a Claude Code session:
+<img src="docs/images/claude-mark.svg" alt="" width="18" align="absmiddle"> Built for Claude Code. From inside a session:
 
 ```
-/plugin marketplace add bedezign/codeatlas
+/plugin marketplace add bedezign/claude-and-me
 /plugin install codeatlas@bedezign
 ```
 
@@ -115,7 +119,7 @@ uv pip install --no-config -e ".[dev]"
 uv run pytest
 ```
 
-For local development, a .claude-plugin/marketplace.json (not tracked in git) in this repo provides a local marketplace entry pointing at this directory. The public entry lives in the separate claude-marketplace repo, which points to the GitHub release.
+For local development, a .claude-plugin/marketplace.json (not tracked in git) in this repo provides a local marketplace entry pointing at this directory. The public entry lives in bedezign/claude-and-me, which points to the GitHub release.
 
 ## License
 

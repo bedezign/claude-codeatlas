@@ -1,5 +1,9 @@
 # Overview
 
+<div align="center">
+  <img src="images/logo.svg" alt="codeatlas" width="140">
+</div>
+
 When Claude Code starts exploring an unfamiliar codebase, it faces a knowledge problem. Without context, every question requires grepping source files, reading code cold, and building understanding from first principles. This is slow and token-expensive, and it repeats every session.
 
 explore-codebase solves this by computing a knowledge graph from static analysis and storing it in a local SQLite database. Instead of reading source files cold, Claude queries this database directly via the explore-codebase skill. The `render` step produces markdown maps on demand for human review.
