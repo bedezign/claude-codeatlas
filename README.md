@@ -19,7 +19,6 @@ Before installing the plugin, ensure you have:
   - macOS (brew): `brew install universal-ctags`
   - Other systems: see [ctags.io](https://ctags.io/)
 - **Python 3.12 or later**
-- **uv** — required for plugin bootstrap. Install from [docs.astral.sh/uv](https://docs.astral.sh/uv/getting-started/installation/)
 
 Note: pyan3, grimp, and vulture are installed automatically by the plugin bootstrap; you do not need to install them separately.
 
@@ -101,10 +100,6 @@ This writes a codeatlas-index.md rule file so future Claude Code sessions invoke
 ctags not found
 
 Static analysis runs but no symbols are extracted. Install universal-ctags via your system package manager (see System prerequisites above).
-
-uv not found (plugin bootstrap fails)
-
-Install uv from [docs.astral.sh/uv/getting-started/installation](https://docs.astral.sh/uv/getting-started/installation/).
 
 Maps are empty or very sparse
 
