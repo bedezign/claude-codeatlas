@@ -55,7 +55,7 @@ Claude orchestrates the full pipeline automatically:
 
 - **init** — Hash source files, detect changes since the last run, emit a JSON changeset
 - **analyze** — Run static analysers (ctags, pyan3, grimp, vulture) and populate the database
-- **render** — Write all maps under .claude/codeatlas/maps/ and per-module pages under .claude/codeatlas/context/ (maps only appear after this step)
+- **render** — Write all maps under .claude/codeatlas/maps/ and per-file context pages under .claude/codeatlas/context/ (maps only appear after this step)
 - **narrative loop** — Claude writes prose explanations for architecture, modules, and other topics, then re-renders to incorporate them
 - **cleanup** — Remove orphan map files from previous runs
 
@@ -63,23 +63,21 @@ All output is stored under .claude/codeatlas/.
 
 ## Maps
 
-After running render, you get eleven markdown maps:
+After running render, you get seven prose-bearing markdown maps:
 
 | File | Contents |
 |------|----------|
 | maps/index.md | Map inventory and entry point; start here |
 | maps/architecture.md | High-level system overview and design rationale |
 | maps/modules.md | Per-module roles, responsibilities, and boundaries |
-| maps/symbols.md | Extracted symbols (functions, classes) with file and line numbers |
-| maps/callgraph.md | Function-call edges from static call-graph analysis |
-| maps/imports.md | Module import graph showing dependencies |
-| maps/dead-code.md | Unused symbols detected by vulture |
 | maps/data.md | Data models and persistence layer narrative |
 | maps/api.md | External API surface narrative |
 | maps/impact.md | BFS blast-radius from changed files (requires --base-sha) |
 | maps/recent-changes.md | Files changed since a reference or date (requires --since) |
 
-All maps live under .claude/codeatlas/maps/. Per-module context pages are stored at .claude/codeatlas/context/<module>.md.
+Symbol-level data (functions, classes, call edges, imports, dead symbols) lives in the SQLite database itself. Query it via the CLI subcommands: `find`, `callers`, `callees`, `impact`, `summary`. Pass `--json` for machine-readable output.
+
+All maps live under .claude/codeatlas/maps/. Context pages are stored under .claude/codeatlas/context/; files with 15 or more symbols get their own `<rel-path>.md` page, while smaller files fold into parent `_module.md` rollups.
 
 ## Activate mode
 

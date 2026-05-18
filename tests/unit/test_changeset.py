@@ -275,9 +275,10 @@ def test_compute_full_on_empty_disk_lists_only_deletions(project: Path, conn):
 
 def _seed_narrative(conn, topic: str, depends_on: str, content: str = "body") -> None:
     conn.execute(
-        "INSERT OR REPLACE INTO narratives (topic, content, depends_on, generated_at)"
-        " VALUES (?, ?, ?, ?)",
-        (topic, content, depends_on, "2026-01-01T00:00:00+00:00"),
+        "INSERT OR REPLACE INTO narratives "
+        "(topic, scope_id, content, depends_on, generated_at)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (topic, "", content, depends_on, "2026-01-01T00:00:00+00:00"),
     )
     conn.commit()
 

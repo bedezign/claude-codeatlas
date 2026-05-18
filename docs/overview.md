@@ -18,7 +18,7 @@ The tool's foundation is a SQLite database stored at `.claude/codeatlas/codebase
 
 **edges** — directed relationships between symbols. Call-graph edges represent which functions invoke which; import-graph edges represent which modules import which. Edges are the foundation for understanding control flow and dependencies.
 
-**dead_code** — symbols that are defined but never used, detected by static analysis. Useful for cleanup and understanding which APIs are actually exercised.
+**dead_symbols** — symbols that are defined but never used, detected by static analysis. Useful for cleanup and understanding which APIs are actually exercised.
 
 **narratives** — prose explanations written by Claude during analysis. These are stored alongside the structural data and rendered into the maps. Narratives persist across re-runs and are only invalidated when the files they cover change.
 
@@ -58,14 +58,6 @@ The `render` step produces markdown files from the database on demand, useful fo
 
 **modules.md** — Per-module roles, responsibilities, and boundaries.
 
-**symbols.md** — All extracted symbols (functions, classes, variables) with file and line numbers.
-
-**callgraph.md** — Function-call edges from static call-graph analysis.
-
-**imports.md** — Module import graph showing dependencies.
-
-**dead-code.md** — Unused symbols detected by static analysis.
-
 **data.md** — Data models and persistence layer narrative.
 
 **api.md** — External API surface narrative.
@@ -74,7 +66,9 @@ The `render` step produces markdown files from the database on demand, useful fo
 
 **recent-changes.md** — Files changed since a reference or date (computed when a `--since` flag is provided to render).
 
-All maps are generated from the database and live under `.claude/codeatlas/maps/`. Per-module context pages are generated under `.claude/codeatlas/context/`. These are all overwritten on every render — hand edits belong in `.claude/codeatlas/notes/`, not in the maps themselves.
+All maps are generated from the database and live under `.claude/codeatlas/maps/`. Per-file context pages are generated under `.claude/codeatlas/context/`: files with 15 or more symbols (`CONTEXT_SYMBOL_THRESHOLD = 15`) get their own page; smaller files fold into a parent `_module.md` rollup for their directory. These are all overwritten on every render — hand edits belong in `.claude/codeatlas/notes/`, not in the maps themselves.
+
+The flat data-dump maps (`symbols.md`, `callgraph.md`, `imports.md`, `dead-code.md`) were removed and replaced by CLI query subcommands: `find`, `callers`, `callees`, `impact`, and `summary`. Use `explore-codebase find <name>` to locate a symbol, `callers`/`callees` to walk the call graph, and `summary` for DB statistics. Run `explore-codebase refresh` to run init and analyze in a single step without piping.
 
 ## Activation
 

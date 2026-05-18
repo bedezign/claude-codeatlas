@@ -17,13 +17,11 @@ from codeatlas.explore_codebase.cli import cmd_cleanup
 
 
 # Files that ``render`` currently writes. Cleanup must keep these.
+# The four flat-data dumps (symbols, callgraph, imports, dead-code) were
+# removed in Phase 4 — they are no longer canonical.
 CANONICAL_MAP_FILES = (
     "architecture.md",
     "modules.md",
-    "symbols.md",
-    "callgraph.md",
-    "imports.md",
-    "dead-code.md",
     "data.md",
     "api.md",
     "impact.md",
@@ -58,6 +56,25 @@ def _insert_file(conn: sqlite3.Connection, path: str) -> None:
     conn.commit()
 
 
+def _insert_many_symbols(conn: sqlite3.Connection, file_id: int, count: int) -> None:
+    for i in range(count):
+        conn.execute(
+            "INSERT INTO symbols (file_id, kind, name, scope, line) VALUES (?, ?, ?, ?, ?)",
+            (file_id, "function", f"fn_{i}", None, i + 1),
+        )
+    conn.commit()
+
+
+def _file_id(conn: sqlite3.Connection, path: str) -> int:
+    cur = conn.execute(
+        "INSERT INTO files (path, sha, language, last_parsed_at) VALUES (?, ?, ?, ?)",
+        (path, "sha_x", "python", "2026-01-01T00:00:00"),
+    )
+    conn.commit()
+    assert cur.lastrowid is not None
+    return cur.lastrowid
+
+
 @pytest.fixture
 def project(tmp_path: Path) -> Path:
     """A project root with the DB pre-initialised (creates maps/, context/, notes/)."""
@@ -83,7 +100,7 @@ def test_orphan_md_in_maps_is_removed(project: Path):
 
 
 def test_canonical_map_files_are_not_removed(project: Path):
-    """All 11 canonical maps written by render must survive cleanup."""
+    """All canonical maps written by render must survive cleanup."""
     for fname in CANONICAL_MAP_FILES:
         (_maps_dir(project) / fname).write_text("# canonical\n")
 
@@ -104,14 +121,30 @@ def test_orphan_only_targets_md_files_in_maps(project: Path):
     assert other.exists(), "cleanup must only target .md files in maps/"
 
 
+def test_flat_dump_maps_are_treated_as_orphans(project: Path):
+    """symbols.md / callgraph.md / imports.md / dead-code.md are no longer canonical.
+
+    If they exist from a previous render run they must be swept as orphans.
+    """
+    for fname in ("symbols.md", "callgraph.md", "imports.md", "dead-code.md"):
+        (_maps_dir(project) / fname).write_text(f"# {fname}\n")
+
+    cmd_cleanup(_args(project))
+
+    for fname in ("symbols.md", "callgraph.md", "imports.md", "dead-code.md"):
+        assert not (_maps_dir(project) / fname).exists(), (
+            f"{fname} is no longer canonical and must be removed as an orphan"
+        )
+
+
 # ---------------------------------------------------------------------------
-# context/ orphan sweep
+# context/ orphan sweep — per-file / rollup structure
 # ---------------------------------------------------------------------------
 
 
-def test_orphan_context_md_removed_when_module_not_in_db(project: Path):
-    """A context/<module>.md whose stem is not a top-level module in DB → delete."""
-    # No files in DB yet → every context/<x>.md is orphan.
+def test_orphan_context_md_removed_when_not_in_expected_set(project: Path):
+    """A context/<x>.md that render would not produce is deleted."""
+    # No files in DB → no context pages expected → any existing file is orphan.
     orphan = _context_dir(project) / "gone_module.md"
     orphan.write_text("# gone\n")
 
@@ -119,19 +152,67 @@ def test_orphan_context_md_removed_when_module_not_in_db(project: Path):
     assert not orphan.exists()
 
 
-def test_context_md_kept_when_module_still_in_db(project: Path):
-    """context/<module>.md is preserved when module has tracked files in DB."""
+def test_context_page_kept_for_large_file(project: Path):
+    """context/<rel-path>.md for a file with >= threshold symbols is kept."""
+    from codeatlas.explore_codebase.render import CONTEXT_SYMBOL_THRESHOLD
+
     conn = _open_db(project)
     try:
-        _insert_file(conn, "pkg_alive/file.py")
+        fid = _file_id(conn, "pkg/big.py")
+        _insert_many_symbols(conn, fid, CONTEXT_SYMBOL_THRESHOLD)
     finally:
         conn.close()
 
-    keep = _context_dir(project) / "pkg_alive.md"
-    keep.write_text("# alive\n")
+    # Pre-create the expected context page.
+    ctx = _context_dir(project) / "pkg"
+    ctx.mkdir(parents=True, exist_ok=True)
+    keep = ctx / "big.md"
+    keep.write_text("# big\n")
 
     cmd_cleanup(_args(project))
-    assert keep.exists(), "module still tracked in DB → context file must be kept"
+    assert keep.exists(), "per-file page for large file must be kept"
+
+
+def test_rollup_page_kept_for_small_file(project: Path):
+    """context/<dir>/_module.md for a dir with small files only is kept."""
+    from codeatlas.explore_codebase.render import CONTEXT_SYMBOL_THRESHOLD
+
+    conn = _open_db(project)
+    try:
+        fid = _file_id(conn, "pkg/small.py")
+        _insert_many_symbols(conn, fid, CONTEXT_SYMBOL_THRESHOLD - 1)
+    finally:
+        conn.close()
+
+    ctx = _context_dir(project) / "pkg"
+    ctx.mkdir(parents=True, exist_ok=True)
+    keep = ctx / "_module.md"
+    keep.write_text("# rollup\n")
+
+    cmd_cleanup(_args(project))
+    assert keep.exists(), "rollup page for small-file dir must be kept"
+
+
+def test_orphan_nested_context_file_is_removed(project: Path):
+    """A nested context file that render would not produce is removed."""
+    from codeatlas.explore_codebase.render import CONTEXT_SYMBOL_THRESHOLD
+
+    conn = _open_db(project)
+    try:
+        # Only a small file → _module.md expected, not big.md.
+        fid = _file_id(conn, "pkg/small.py")
+        _insert_many_symbols(conn, fid, CONTEXT_SYMBOL_THRESHOLD - 1)
+    finally:
+        conn.close()
+
+    # Pre-create the wrong per-file page (render would produce _module.md, not big.md).
+    ctx = _context_dir(project) / "pkg"
+    ctx.mkdir(parents=True, exist_ok=True)
+    orphan = ctx / "big.md"
+    orphan.write_text("# stale\n")
+
+    cmd_cleanup(_args(project))
+    assert not orphan.exists(), "stale per-file page must be removed"
 
 
 def test_context_only_targets_md_files(project: Path):
@@ -144,7 +225,7 @@ def test_context_only_targets_md_files(project: Path):
 
 
 def test_context_md_with_top_level_files_still_orphan(project: Path):
-    """A file with no directory prefix has no top-level module — context entry is orphan."""
+    """A file with no directory prefix has no context page — any such file is orphan."""
     conn = _open_db(project)
     try:
         # Top-level file: no directory → not a module.
@@ -239,9 +320,7 @@ def test_legacy_dir_warning_when_present(project: Path, capsys):
     assert "legacy directory .codeatlas/" in output, (
         "must warn about legacy dir presence"
     )
-    assert ".claude/codeatlas/" in output, (
-        "warning must name the migration destination"
-    )
+    assert ".claude/codeatlas/" in output, "warning must name the migration destination"
     # Warning only — never auto-delete.
     assert legacy.exists(), "legacy dir must NOT be auto-deleted"
     assert (legacy / "old-file.md").exists()
@@ -345,7 +424,7 @@ def test_running_cleanup_twice_is_idempotent(project: Path, capsys):
 def test_canonical_set_matches_render_output(project: Path):
     """Drift guard: cleanup's canonical set must equal what render actually writes.
 
-    If render gains a 12th map file and cleanup is not updated, this test fires.
+    If render gains or loses a map file and cleanup is not updated, this test fires.
     """
     import argparse
 

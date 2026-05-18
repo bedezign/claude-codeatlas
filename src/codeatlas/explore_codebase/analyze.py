@@ -82,12 +82,12 @@ def _now_iso() -> str:
 def _delete_file_rows(conn, paths) -> None:
     """Remove files rows for paths; CASCADE wipes their symbols and edges.
 
-    dead_code is not foreign-keyed (table holds untyped path strings), so it
+    dead_symbols is not foreign-keyed (table holds untyped path strings), so it
     needs an explicit DELETE alongside the cascade.
     """
     for path in paths:
         conn.execute("DELETE FROM files WHERE path = ?", (path,))
-        conn.execute("DELETE FROM dead_code WHERE file = ?", (path,))
+        conn.execute("DELETE FROM dead_symbols WHERE file = ?", (path,))
     conn.commit()
 
 
@@ -109,7 +109,8 @@ def _run_ctags(abs_path: Path) -> list[dict]:
     """Run ctags on a single file and return the parsed JSON tag list."""
     try:
         proc = subprocess.run(
-            ["ctags", "--output-format=json", "--fields=+n", "-f", "-", str(abs_path)],
+            # --fields=+ne: +n enables 'line' (start line), +e enables 'end' (end line).
+            ["ctags", "--output-format=json", "--fields=+ne", "-f", "-", str(abs_path)],
             capture_output=True,
             text=True,
             check=False,
@@ -143,10 +144,27 @@ def _insert_symbols(conn, file_id: int, tags) -> None:
         kind = _KIND_NORMALIZE.get(tag.get("kind"), tag.get("kind"))
         if kind not in _KEPT_KINDS:
             continue
+        line_start = tag.get("line")
+        # Universal ctags emits end-line in the 'end' field when --fields=+e is set.
+        # Not all symbol kinds receive an end field; store NULL for both when absent.
+        line_end = tag.get("end")
+        loc = (
+            (line_end - line_start + 1)
+            if (line_end is not None and line_start is not None)
+            else None
+        )
         conn.execute(
-            "INSERT INTO symbols (file_id, kind, name, scope, line) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (file_id, kind, tag.get("name", ""), tag.get("scope"), tag.get("line")),
+            "INSERT INTO symbols (file_id, kind, name, scope, line, line_end, loc) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                file_id,
+                kind,
+                tag.get("name", ""),
+                tag.get("scope"),
+                line_start,
+                line_end,
+                loc,
+            ),
         )
     conn.commit()
 
@@ -399,8 +417,9 @@ def _resolve_module_to_symbol(conn, rel_path: str) -> int | None:
         return None
     module_name = Path(rel_path).stem
     cur = conn.execute(
-        "INSERT INTO symbols (file_id, kind, name, scope, line) VALUES (?, ?, ?, ?, ?)",
-        (file_row[0], "module", module_name, None, 1),
+        "INSERT INTO symbols (file_id, kind, name, scope, line, line_end, loc) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (file_row[0], "module", module_name, None, 1, None, None),
     )
     conn.commit()
     return cur.lastrowid
@@ -486,7 +505,7 @@ def _to_relative(path: str, project_root: Path) -> str:
     return path
 
 
-def _insert_dead_code(conn, project_root: Path, py_rel_paths: list[str]) -> None:
+def _insert_dead_symbols(conn, project_root: Path, py_rel_paths: list[str]) -> None:
     if not py_rel_paths:
         return
     abs_paths = [project_root / p for p in py_rel_paths]
@@ -494,7 +513,7 @@ def _insert_dead_code(conn, project_root: Path, py_rel_paths: list[str]) -> None
     rows = _parse_vulture(output, project_root)
     for row in rows:
         conn.execute(
-            "INSERT INTO dead_code (file, line, kind, name, confidence) "
+            "INSERT INTO dead_symbols (file, line, kind, name, confidence) "
             "VALUES (?, ?, ?, ?, ?)",
             row,
         )
@@ -561,7 +580,7 @@ def _file_sha(abs_path: Path) -> str:
 
 
 def _process_file_phase1(conn, project_root: Path, rel_path: str) -> bool:
-    """Phase 1: insert files+symbols+dead_code rows.
+    """Phase 1: insert files+symbols+dead_symbols rows.
 
     Returns True if the file was processed, False if it vanished.
     """
@@ -583,12 +602,15 @@ def _process_file_phase1(conn, project_root: Path, rel_path: str) -> bool:
 def run(conn, project_root, *, changed, new, deleted) -> int:
     """Run static analysis tools and write results to the DB.
 
-    Two-phase orchestration: phase 1 inserts files, symbols, and dead_code
+    Two-phase orchestration: phase 1 inserts files, symbols, and dead_symbols
     rows for every path in changed|new. Phase 2 then runs the edge-emitting
     tools (pyan3, grimp) against the now-complete symbol table, so edges
     resolve regardless of file processing order. Unresolvable edges (e.g.
     pyan3 false positives through __init__.py) are silently dropped.
     """
+    import time
+
+    t0 = time.perf_counter()
     root = Path(project_root)
 
     _delete_file_rows(conn, deleted)
@@ -604,6 +626,16 @@ def run(conn, project_root, *, changed, new, deleted) -> int:
     py_paths = _python_paths(processed)
     _insert_call_edges(conn, root, py_paths)
     _insert_import_edges(conn, root, py_paths)
-    _insert_dead_code(conn, root, py_paths)
+    _insert_dead_symbols(conn, root, py_paths)
+
+    elapsed = time.perf_counter() - t0
+    n_files = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+    n_symbols = conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    n_edges = conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+    n_dead = conn.execute("SELECT COUNT(*) FROM dead_symbols").fetchone()[0]
+    sys.stdout.write(
+        f"analyze: {n_files} files / {n_symbols} symbols / {n_edges} edges"
+        f" / {n_dead} dead-symbols in {elapsed:.1f}s\n"
+    )
 
     return 0

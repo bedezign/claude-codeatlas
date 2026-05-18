@@ -17,6 +17,8 @@ def _args(
     *,
     topic: str | None = "architecture",
     content_file: str | None = None,
+    scope: str = "",
+    depends_on: str | None = None,
 ):
     import argparse
 
@@ -24,6 +26,8 @@ def _args(
         project_root=str(project),
         topic=topic,
         content_file=content_file,
+        scope=scope,
+        depends_on=depends_on,
     )
 
 
@@ -401,3 +405,261 @@ def test_parser_accepts_full_narrative_invocation():
     assert ns.topic == "architecture"
     assert ns.content_file == "doc.md"
     assert ns.project_root == "/tmp/x"
+
+
+# ---------------------------------------------------------------------------
+# Section 4: scope_id composite key
+# ---------------------------------------------------------------------------
+
+
+def _seed_symbol_in_db(project: Path, file_rel: str, sym_name: str) -> None:
+    """Insert a file + symbol row so depends_on detection finds them."""
+    from codeatlas.explore_codebase import db
+
+    db_path = project / ".claude/codeatlas/codebase.db"
+    conn = db.init(db_path)
+    try:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO files (path, sha, language, last_parsed_at) "
+            "VALUES (?, ?, ?, ?)",
+            (file_rel, "deadbeef", "python", "2026-01-01T00:00:00"),
+        )
+        conn.commit()
+        file_id = (
+            cur.lastrowid
+            or conn.execute(
+                "SELECT id FROM files WHERE path = ?", (file_rel,)
+            ).fetchone()[0]
+        )
+        conn.execute(
+            "INSERT INTO symbols (file_id, kind, name, scope, line, line_end, loc) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (file_id, "function", sym_name, None, 1, None, None),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_cmd_narrative_default_scope_id_is_empty_string(project: Path):
+    """No --scope → scope_id stored as empty string."""
+    content = _write_content(project)
+    cmd_narrative(_args(project, content_file=str(content)))
+
+    conn = _open_db(project)
+    try:
+        row = conn.execute(
+            "SELECT scope_id FROM narratives WHERE topic = 'architecture'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    assert row[0] == ""
+
+
+def test_cmd_narrative_explicit_scope_id_stored(project: Path):
+    """--scope src/mypkg → scope_id stored as 'src/mypkg'."""
+    content = _write_content(project)
+    cmd_narrative(_args(project, content_file=str(content), scope="src/mypkg"))
+
+    conn = _open_db(project)
+    try:
+        row = conn.execute(
+            "SELECT scope_id FROM narratives WHERE topic = 'architecture'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    assert row[0] == "src/mypkg"
+
+
+def test_cmd_narrative_two_scopes_same_topic_coexist(project: Path):
+    """Two upserts with same topic, different scope → both rows coexist."""
+    content = _write_content(project)
+    cmd_narrative(_args(project, topic="context", content_file=str(content), scope=""))
+    cmd_narrative(
+        _args(project, topic="context", content_file=str(content), scope="src/pkg_a")
+    )
+
+    conn = _open_db(project)
+    try:
+        rows = conn.execute(
+            "SELECT scope_id FROM narratives WHERE topic = 'context'"
+        ).fetchall()
+    finally:
+        conn.close()
+    scopes = {r[0] for r in rows}
+    assert "" in scopes
+    assert "src/pkg_a" in scopes
+
+
+def test_cmd_narrative_upsert_same_topic_same_scope_replaces(project: Path):
+    """Same (topic, scope_id) → upsert replaces, no duplicate."""
+    first = project / "first.md"
+    first.write_text("first version\n")
+    second = project / "second.md"
+    second.write_text("second version\n")
+
+    cmd_narrative(_args(project, topic="t", content_file=str(first), scope="pkg"))
+    cmd_narrative(_args(project, topic="t", content_file=str(second), scope="pkg"))
+
+    conn = _open_db(project)
+    try:
+        rows = conn.execute(
+            "SELECT content FROM narratives WHERE topic = 't' AND scope_id = 'pkg'"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 1
+    assert rows[0][0] == "second version\n"
+
+
+# ---------------------------------------------------------------------------
+# Section 5: symbol-mention depends_on
+# ---------------------------------------------------------------------------
+
+
+def test_depends_on_uses_symbol_owner_when_mentioned(project: Path):
+    """Content mentioning symbol 'Foo' from mod_a.py → depends_on has only mod_a.py."""
+    _write_source(project, "mod_a.py")
+    _write_source(project, "mod_b.py")
+    _seed_symbol_in_db(project, "mod_a.py", "Foo")
+    _seed_symbol_in_db(project, "mod_b.py", "Bar")
+
+    content_path = project / "content.md"
+    content_path.write_text("This narrative is about Foo in the codebase.\n")
+
+    cmd_narrative(_args(project, topic="architecture", content_file=str(content_path)))
+
+    conn = _open_db(project)
+    try:
+        raw = conn.execute(
+            "SELECT depends_on FROM narratives WHERE topic = 'architecture'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    entries = json.loads(raw)
+    paths = [e["path"] for e in entries]
+    assert "mod_a.py" in paths
+    assert "mod_b.py" not in paths
+
+
+def test_depends_on_collects_multiple_files_for_multiple_symbol_mentions(project: Path):
+    """Content mentioning symbols from two files → depends_on contains both files."""
+    _write_source(project, "mod_a.py")
+    _write_source(project, "mod_b.py")
+    _seed_symbol_in_db(project, "mod_a.py", "AlphaClass")
+    _seed_symbol_in_db(project, "mod_b.py", "BetaClass")
+
+    content_path = project / "content.md"
+    content_path.write_text("AlphaClass and BetaClass are the main components.\n")
+
+    cmd_narrative(_args(project, topic="architecture", content_file=str(content_path)))
+
+    conn = _open_db(project)
+    try:
+        raw = conn.execute(
+            "SELECT depends_on FROM narratives WHERE topic = 'architecture'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    entries = json.loads(raw)
+    paths = {e["path"] for e in entries}
+    assert "mod_a.py" in paths
+    assert "mod_b.py" in paths
+
+
+def test_depends_on_falls_back_to_topic_scope_when_no_symbol_mentions(project: Path):
+    """Content with no symbol mentions falls back to full topic scope."""
+    _write_source(project, "pkg_a/alpha.py")
+    _write_source(project, "pkg_a/beta.py")
+    # No symbols seeded in DB → no mentions can match.
+
+    content_path = project / "content.md"
+    content_path.write_text("General architecture overview with no specific symbols.\n")
+
+    cmd_narrative(_args(project, topic="context/pkg_a", content_file=str(content_path)))
+
+    conn = _open_db(project)
+    try:
+        raw = conn.execute(
+            "SELECT depends_on FROM narratives WHERE topic = 'context/pkg_a'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    entries = json.loads(raw)
+    paths = {e["path"] for e in entries}
+    # Falls back to topic scope: pkg_a/alpha.py and pkg_a/beta.py
+    assert "pkg_a/alpha.py" in paths
+    assert "pkg_a/beta.py" in paths
+
+
+def test_depends_on_override_flag_skips_detection(project: Path):
+    """--depends-on a.py,b.py overrides symbol-mention detection."""
+    _write_source(project, "a.py")
+    _write_source(project, "b.py")
+    _write_source(project, "c.py")
+    _seed_symbol_in_db(project, "c.py", "CFunc")
+
+    content_path = project / "content.md"
+    content_path.write_text("CFunc is used here.\n")
+
+    # Override: only a.py and b.py, even though CFunc (from c.py) is mentioned.
+    cmd_narrative(
+        _args(
+            project,
+            topic="architecture",
+            content_file=str(content_path),
+            depends_on="a.py,b.py",
+        )
+    )
+
+    conn = _open_db(project)
+    try:
+        raw = conn.execute(
+            "SELECT depends_on FROM narratives WHERE topic = 'architecture'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    entries = json.loads(raw)
+    paths = {e["path"] for e in entries}
+    assert "a.py" in paths
+    assert "b.py" in paths
+    assert "c.py" not in paths
+
+
+def test_depends_on_rejects_path_escape(project: Path, capsys):
+    """--depends-on with a path that escapes the project root returns 1 with an error."""
+    content = _write_content(project)
+    rc = cmd_narrative(
+        _args(project, topic="t", content_file=str(content), depends_on="../outside.py")
+    )
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "escapes project root" in captured.err
+
+
+def test_parser_accepts_scope_and_depends_on_flags():
+    """build_parser registers --scope and --depends-on on narrative."""
+    from codeatlas.explore_codebase.cli import build_parser
+
+    parser = build_parser()
+    ns = parser.parse_args(
+        [
+            "narrative",
+            "--topic",
+            "context",
+            "--content-file",
+            "doc.md",
+            "--scope",
+            "src/mypkg",
+            "--depends-on",
+            "a.py,b.py",
+        ]
+    )
+    assert ns.scope == "src/mypkg"
+    assert ns.depends_on == "a.py,b.py"

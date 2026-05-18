@@ -1,6 +1,6 @@
 {
   "name": "codeatlas",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "SQLite-backed codebase knowledge graph for Claude Code — incremental static analysis, AI narratives, and markdown maps",
   "author": {
     "name": "B&E DeZign",

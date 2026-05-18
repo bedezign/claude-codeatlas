@@ -1,7 +1,7 @@
 """Phase 5+6: DB → markdown renderer for explore-codebase.
 
 Reads the SQLite knowledge graph and writes the canonical map files under
-``<project-root>/.claude/codeatlas/maps/`` plus per-module context files under
+``<project-root>/.claude/codeatlas/maps/`` plus per-file context files under
 ``<project-root>/.claude/codeatlas/context/``. Every generated file starts with
 the banner that warns the reader the file is regenerated and hand edits will
 be lost.
@@ -16,6 +16,16 @@ Phase 6 adds three further maps:
   intersected with the ``files`` table, plus their one-hop outgoing
   dependents.
 - ``index.md`` — a table of contents + stats block + navigation hints.
+
+Phase 4 removes the flat data-dump maps (symbols.md, callgraph.md,
+imports.md, dead-code.md). Those are superseded by the CLI query
+subcommands (find, callers, callees, impact, summary).
+
+Context granularity (Phase 4): files with >= CONTEXT_SYMBOL_THRESHOLD
+symbols get their own ``context/<rel-path>.md`` (path mirrored, .py → .md).
+Files with fewer symbols fold into a parent rollup
+``context/<parent-dir>/_module.md`` that aggregates all small files under
+that directory.
 
 The git invocation behind ``recent-changes.md`` is injected via
 ``git_log_fn``; the production default shells out via ``subprocess`` so
@@ -46,28 +56,23 @@ _CONTEXT_REL = _CODEBASE_REL / "context"
 # (tuples, dicts, run() body) stays in sync without bare string repetition.
 _ARCHITECTURE_MD = "architecture.md"
 _MODULES_MD = "modules.md"
-_SYMBOLS_MD = "symbols.md"
-_CALLGRAPH_MD = "callgraph.md"
-_IMPORTS_MD = "imports.md"
-_DEAD_CODE_MD = "dead-code.md"
 _DATA_MD = "data.md"
 _API_MD = "api.md"
 _IMPACT_MD = "impact.md"
 _RECENT_CHANGES_MD = "recent-changes.md"
 _INDEX_MD = "index.md"
 
-# Reusable markdown table header for symbol tables (File / Name / Kind / Line).
-_SYMBOL_TABLE_HEADER = "| File | Name | Kind | Line |"
-_SYMBOL_TABLE_DIVIDER = "| --- | --- | --- | ---: |"
+# Files with this many symbols or more get their own per-file context page.
+# Files below the threshold fold into the parent directory's _module.md rollup.
+CONTEXT_SYMBOL_THRESHOLD = 15
+
+# Filename for directory rollup context pages.
+MODULE_ROLLUP_FILENAME = "_module.md"
 
 # Map files always rendered, even when the DB is empty.
 _MAP_FILES = (
     _ARCHITECTURE_MD,
     _MODULES_MD,
-    _SYMBOLS_MD,
-    _CALLGRAPH_MD,
-    _IMPORTS_MD,
-    _DEAD_CODE_MD,
     _DATA_MD,
     _API_MD,
 )
@@ -84,7 +89,10 @@ CANONICAL_MAP_FILES: tuple[str, ...] = _MAP_FILES + _PHASE6_MAP_FILES
 _IMPACT_MAX_DEPTH = 2
 
 _DATA_KINDS = ("class", "attribute", "variable")
-_DEAD_CODE_KINDS = ("function", "class")
+
+# Reusable markdown table header for symbol tables (File / Name / Kind / Line).
+_SYMBOL_TABLE_HEADER = "| File | Name | Kind | Line |"
+_SYMBOL_TABLE_DIVIDER = "| --- | --- | --- | ---: |"
 
 
 # ---------------------------------------------------------------------------
@@ -156,114 +164,6 @@ def _render_modules(conn: sqlite3.Connection) -> str:
     return "\n".join(lines)
 
 
-def _render_symbols(conn: sqlite3.Connection) -> str:
-    """All symbols sorted by file path, then line."""
-    rows = conn.execute(
-        "SELECT f.path, s.name, s.kind, s.line "
-        "FROM symbols s JOIN files f ON f.id = s.file_id "
-        "ORDER BY f.path, s.line, s.name"
-    ).fetchall()
-
-    lines = ["# Symbols", ""]
-    if not rows:
-        lines.append("_No symbols indexed._")
-        return "\n".join(lines)
-
-    lines.append(_SYMBOL_TABLE_HEADER)
-    lines.append(_SYMBOL_TABLE_DIVIDER)
-    for path, name, kind, line in rows:
-        line_str = "" if line is None else str(line)
-        lines.append(f"| {path} | {name} | {kind} | {line_str} |")
-    return "\n".join(lines)
-
-
-def _render_edge_graph(
-    conn: sqlite3.Connection,
-    kind: str,
-    title: str,
-    verb: str,
-    empty_msg: str,
-) -> str:
-    """Adjacency list of edges of ``kind``, grouped by source file.
-
-    ``title`` is the H1 heading. ``verb`` is the inline relationship word
-    between source and destination symbol names (e.g. ``'→'`` or ``'imports'``).
-    ``empty_msg`` is the placeholder rendered when there are no matching edges.
-    """
-    rows = conn.execute(
-        "SELECT fs.path AS src_path, ss.name AS src_name, "
-        "fd.path AS dst_path, sd.name AS dst_name "
-        "FROM edges e "
-        "JOIN symbols ss ON ss.id = e.src_id "
-        "JOIN files fs ON fs.id = ss.file_id "
-        "JOIN symbols sd ON sd.id = e.dst_id "
-        "JOIN files fd ON fd.id = sd.file_id "
-        "WHERE e.kind = ? "
-        "ORDER BY fs.path, ss.name, fd.path, sd.name",
-        (kind,),
-    ).fetchall()
-
-    lines = [f"# {title}", ""]
-    if not rows:
-        lines.append(empty_msg)
-        return "\n".join(lines)
-
-    grouped: dict[str, list[tuple[str, str, str]]] = {}
-    for src_path, src_name, dst_path, dst_name in rows:
-        grouped.setdefault(src_path, []).append((src_name, dst_path, dst_name))
-
-    for src_path in sorted(grouped):
-        lines.append(f"## {src_path}")
-        lines.append("")
-        for src_name, dst_path, dst_name in grouped[src_path]:
-            lines.append(f"- `{src_name}` {verb} `{dst_name}` ({dst_path})")
-        lines.append("")
-    return "\n".join(lines)
-
-
-def _render_callgraph(conn: sqlite3.Connection) -> str:
-    """Adjacency list of kind='calls' edges, grouped by caller file."""
-    return _render_edge_graph(
-        conn, "calls", "Call Graph", "→", "_No call edges recorded._"
-    )
-
-
-def _render_imports(conn: sqlite3.Connection) -> str:
-    """Adjacency list of kind='imports' edges, grouped by importer file."""
-    return _render_edge_graph(
-        conn, "imports", "Imports", "imports", "_No import edges recorded._"
-    )
-
-
-def _render_dead_code(conn: sqlite3.Connection) -> str:
-    """Functions and classes with no incoming kind='calls' edge."""
-    placeholders = ",".join("?" * len(_DEAD_CODE_KINDS))
-    rows = conn.execute(
-        f"SELECT f.path, s.name, s.kind, s.line "
-        f"FROM symbols s JOIN files f ON f.id = s.file_id "
-        f"WHERE s.kind IN ({placeholders}) "
-        f"AND NOT EXISTS ("
-        f"  SELECT 1 FROM edges e WHERE e.dst_id = s.id AND e.kind = 'calls'"
-        f") "
-        f"ORDER BY f.path, s.line, s.name",
-        _DEAD_CODE_KINDS,
-    ).fetchall()
-
-    lines = ["# Dead Code", ""]
-    if not rows:
-        lines.append("_No unreferenced callables found._")
-        return "\n".join(lines)
-
-    lines.append("Functions and classes with no incoming `calls` edges.")
-    lines.append("")
-    lines.append(_SYMBOL_TABLE_HEADER)
-    lines.append(_SYMBOL_TABLE_DIVIDER)
-    for path, name, kind, line in rows:
-        line_str = "" if line is None else str(line)
-        lines.append(f"| {path} | {name} | {kind} | {line_str} |")
-    return "\n".join(lines)
-
-
 def _render_data(conn: sqlite3.Connection) -> str:
     """Symbols of kind class/attribute/variable with their file and line."""
     placeholders = ",".join("?" * len(_DATA_KINDS))
@@ -317,34 +217,77 @@ def _render_api(conn: sqlite3.Connection) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Per-module context renderers
+# Per-file context renderers
 # ---------------------------------------------------------------------------
 
 
-def _module_buckets(conn: sqlite3.Connection) -> dict[str, list[str]]:
-    """Group all tracked files by their top-level directory.
-
-    Files at the project root (no directory segment) are skipped since they
-    have no enclosing module.
-    """
-    rows = conn.execute("SELECT path FROM files ORDER BY path").fetchall()
-    buckets: dict[str, list[str]] = {}
-    for (path,) in rows:
-        module = _top_module(path)
-        if module is None:
-            continue
-        buckets.setdefault(module, []).append(path)
-    return buckets
+def _symbol_counts_by_file(conn: sqlite3.Connection) -> dict[str, int]:
+    """Return {rel_path: symbol_count} for all tracked files."""
+    rows = conn.execute(
+        "SELECT f.path, COUNT(s.id) "
+        "FROM files f LEFT JOIN symbols s ON s.file_id = f.id "
+        "GROUP BY f.id"
+    ).fetchall()
+    return {path: count for path, count in rows}
 
 
-def _render_context_for_module(
-    conn: sqlite3.Connection, module: str, files: list[str]
+def _render_context_for_file(conn: sqlite3.Connection, rel_path: str) -> str:
+    """Render a per-file context page with symbols and outgoing edges."""
+    lines = [f"# Context: {rel_path}", "", "## Symbols", ""]
+
+    sym_rows = conn.execute(
+        "SELECT s.name, s.kind, s.line "
+        "FROM symbols s JOIN files f ON f.id = s.file_id "
+        "WHERE f.path = ? "
+        "ORDER BY s.line, s.name",
+        (rel_path,),
+    ).fetchall()
+
+    if sym_rows:
+        lines.append(_SYMBOL_TABLE_HEADER)
+        lines.append(_SYMBOL_TABLE_DIVIDER)
+        for name, kind, line in sym_rows:
+            line_str = "" if line is None else str(line)
+            lines.append(f"| {rel_path} | {name} | {kind} | {line_str} |")
+    else:
+        lines.append("_No symbols in this file._")
+    lines.append("")
+
+    edge_rows = conn.execute(
+        "SELECT ss.name, fd.path, sd.name, e.kind "
+        "FROM edges e "
+        "JOIN symbols ss ON ss.id = e.src_id "
+        "JOIN files fs ON fs.id = ss.file_id "
+        "JOIN symbols sd ON sd.id = e.dst_id "
+        "JOIN files fd ON fd.id = sd.file_id "
+        "WHERE fs.path = ? "
+        "ORDER BY ss.name, e.kind, fd.path, sd.name",
+        (rel_path,),
+    ).fetchall()
+
+    lines.append("## Outgoing Edges")
+    lines.append("")
+    if edge_rows:
+        lines.append("| From Symbol | Edge | To Symbol | To File |")
+        lines.append("| --- | --- | --- | --- |")
+        for src_name, dst_path, dst_name, kind in edge_rows:
+            lines.append(f"| {src_name} | {kind} | {dst_name} | {dst_path} |")
+    else:
+        lines.append("_No outgoing edges._")
+    return "\n".join(lines)
+
+
+def _render_context_for_module_rollup(
+    conn: sqlite3.Connection, parent_dir: str, files: list[str]
 ) -> str:
-    """Render a per-module context page with files, symbols, and outgoing edges."""
-    lines = [f"# Context: {module}", "", "## Files", ""]
-    for path in files:
+    """Render an aggregated context page for small files under parent_dir."""
+    lines = [f"# Context: {parent_dir} (module rollup)", "", "## Files", ""]
+    for path in sorted(files):
         lines.append(f"- {path}")
     lines.append("")
+
+    if not files:
+        return "\n".join(lines)
 
     placeholders = ",".join("?" * len(files))
     sym_rows = conn.execute(
@@ -391,6 +334,23 @@ def _render_context_for_module(
     else:
         lines.append("_No outgoing edges._")
     return "\n".join(lines)
+
+
+def _context_output_path(rel_path: str) -> str:
+    """Convert a source rel_path to its context output path (mirrors the dir tree).
+
+    ``src/foo/bar.py`` → ``src/foo/bar.md``
+    """
+    p = Path(rel_path)
+    return str(p.with_suffix(".md"))
+
+
+def _parent_dir(rel_path: str) -> str | None:
+    """Return the parent directory of rel_path, or None for root-level files."""
+    parts = Path(rel_path).parts
+    if len(parts) < 2:
+        return None
+    return str(Path(*parts[:-1]))
 
 
 # ---------------------------------------------------------------------------
@@ -600,12 +560,8 @@ def _render_recent_changes(
 # ---------------------------------------------------------------------------
 
 _INDEX_DESCRIPTIONS = (
-    (_ARCHITECTURE_MD, "Module-level dependency overview."),
+    (_ARCHITECTURE_MD, "Source files grouped by top-level module."),
     (_MODULES_MD, "Files grouped by top-level module with symbol counts."),
-    (_SYMBOLS_MD, "Every indexed symbol sorted by file and line."),
-    (_CALLGRAPH_MD, "Adjacency list of `calls` edges grouped by caller file."),
-    (_IMPORTS_MD, "Adjacency list of `imports` edges grouped by importer file."),
-    (_DEAD_CODE_MD, "Functions and classes with no incoming `calls` edge."),
     (_DATA_MD, "Classes, attributes, and module-level variables."),
     (_API_MD, "Functions invoked from outside their declaring file."),
     (_IMPACT_MD, "Blast-radius BFS from changed files (provide --base-sha)."),
@@ -616,10 +572,10 @@ _INDEX_DESCRIPTIONS = (
 )
 
 _INDEX_NAVIGATION = (
-    "Use `callgraph.md` to trace call chains, `imports.md` for module-level "
-    "dependencies, `dead-code.md` to find unused callables, `impact.md` to "
-    "estimate blast radius before a refactor, and `recent-changes.md` to "
-    "review what moved recently."
+    "Use `explore-codebase find <name>` to locate a symbol, "
+    "`callers <symbol>` / `callees <symbol>` to walk the call graph, "
+    "`impact <file>` to estimate blast radius, and `summary` for DB stats. "
+    "See `architecture.md`, `modules.md`, and the `context/` pages for prose narratives."
 )
 
 
@@ -657,10 +613,6 @@ def _render_index(conn: sqlite3.Connection) -> str:
 _RENDERERS = {
     _ARCHITECTURE_MD: _render_architecture,
     _MODULES_MD: _render_modules,
-    _SYMBOLS_MD: _render_symbols,
-    _CALLGRAPH_MD: _render_callgraph,
-    _IMPORTS_MD: _render_imports,
-    _DEAD_CODE_MD: _render_dead_code,
     _DATA_MD: _render_data,
     _API_MD: _render_api,
 }
@@ -674,7 +626,7 @@ def run(
     since: str | None = None,
     git_log_fn: GitLogFn | None = None,
 ) -> int:
-    """Render all map files and per-module context files. Returns 0 on success.
+    """Render all map files and per-file context files. Returns 0 on success.
 
     Phase 6 keyword arguments:
     - ``base_sha`` — when provided, files whose stored sha differs feed the
@@ -713,9 +665,37 @@ def run(
     _write(maps_dir / _INDEX_MD, index_body, written)
     sys.stdout.write(f"Written: {_MAPS_REL.as_posix()}/{_INDEX_MD}\n")
 
-    for module, files in _module_buckets(conn).items():
-        body = _render_context_for_module(conn, module, files)
-        _write(context_dir / f"{module}.md", body, written)
-        sys.stdout.write(f"Written: {_CONTEXT_REL.as_posix()}/{module}.md\n")
+    # Per-file context: partition files by symbol count.
+    symbol_counts = _symbol_counts_by_file(conn)
+
+    # Collect small files grouped by parent directory for rollup pages.
+    rollup_files: dict[str, list[str]] = {}
+
+    for rel_path, count in sorted(symbol_counts.items()):
+        parent = _parent_dir(rel_path)
+        if parent is None:
+            # Root-level file: skip (no module to attach to).
+            continue
+        if count >= CONTEXT_SYMBOL_THRESHOLD:
+            # Large file: its own context page.
+            out_rel = _context_output_path(rel_path)
+            out_path = context_dir / out_rel
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            body = _render_context_for_file(conn, rel_path)
+            _write(out_path, body, written)
+            sys.stdout.write(f"Written: {_CONTEXT_REL.as_posix()}/{out_rel}\n")
+        else:
+            # Small file: fold into parent rollup.
+            rollup_files.setdefault(parent, []).append(rel_path)
+
+    # Write rollup pages for directories that have small files.
+    for parent_dir_name, files in sorted(rollup_files.items()):
+        rollup_path = context_dir / parent_dir_name / MODULE_ROLLUP_FILENAME
+        rollup_path.parent.mkdir(parents=True, exist_ok=True)
+        body = _render_context_for_module_rollup(conn, parent_dir_name, files)
+        _write(rollup_path, body, written)
+        sys.stdout.write(
+            f"Written: {_CONTEXT_REL.as_posix()}/{parent_dir_name}/{MODULE_ROLLUP_FILENAME}\n"
+        )
 
     return 0

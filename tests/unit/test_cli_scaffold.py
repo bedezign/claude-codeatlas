@@ -5,7 +5,9 @@ import sys
 
 
 def test_package_imports():
-    import codeatlas.explore_codebase  # noqa: F401
+    import codeatlas.explore_codebase as pkg
+
+    assert pkg.__name__ == "codeatlas.explore_codebase"
 
 
 def test_main_is_callable():
@@ -18,15 +20,21 @@ def test_build_parser_exposes_all_subcommands():
     from codeatlas.explore_codebase.cli import build_parser
 
     parser = build_parser()
-    subparsers_action = next(
-        a for a in parser._actions if isinstance(a.choices, dict)
-    )
-    assert set(subparsers_action.choices.keys()) == {
+    subparsers_action = next(a for a in parser._actions if isinstance(a.choices, dict))
+    choices = subparsers_action.choices
+    assert isinstance(choices, dict)
+    assert set(choices.keys()) == {
         "init",
         "analyze",
+        "refresh",
         "narrative",
         "render",
         "cleanup",
+        "find",
+        "callers",
+        "callees",
+        "impact",
+        "summary",
     }
 
 

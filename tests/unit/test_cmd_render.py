@@ -87,6 +87,20 @@ def _insert_edge(conn: sqlite3.Connection, src_id: int, dst_id: int, kind: str) 
     conn.commit()
 
 
+def _insert_many_symbols(
+    conn: sqlite3.Connection,
+    file_id: int,
+    count: int,
+    prefix: str = "fn",
+) -> list[int]:
+    """Insert *count* function symbols into file_id and return their IDs."""
+    ids = []
+    for i in range(count):
+        sym_id = _insert_symbol(conn, file_id, f"{prefix}_{i}", "function", line=i + 1)
+        ids.append(sym_id)
+    return ids
+
+
 @pytest.fixture
 def project(tmp_path: Path) -> Path:
     """A project root with the DB pre-initialised."""
@@ -136,15 +150,16 @@ def test_cmd_render_returns_zero(project: Path):
     assert rc == 0
 
 
+# The four flat-data maps (symbols.md, callgraph.md, imports.md, dead-code.md)
+# were removed in Phase 4. These are the remaining canonical maps.
 EXPECTED_MAP_FILES = {
     "architecture.md",
     "modules.md",
-    "symbols.md",
-    "callgraph.md",
-    "imports.md",
-    "dead-code.md",
     "data.md",
     "api.md",
+    "impact.md",
+    "recent-changes.md",
+    "index.md",
 }
 
 
@@ -153,6 +168,16 @@ def test_cmd_render_writes_all_expected_map_files(populated_project: Path):
     written = {p.name for p in _maps_dir(populated_project).iterdir() if p.is_file()}
     assert EXPECTED_MAP_FILES.issubset(written), (
         f"missing: {EXPECTED_MAP_FILES - written}"
+    )
+
+
+def test_removed_flat_dump_maps_are_absent(populated_project: Path):
+    """symbols.md / callgraph.md / imports.md / dead-code.md must NOT be written."""
+    cmd_render(_args(populated_project))
+    written = {p.name for p in _maps_dir(populated_project).iterdir() if p.is_file()}
+    removed = {"symbols.md", "callgraph.md", "imports.md", "dead-code.md"}
+    assert not (removed & written), (
+        f"flat-dump maps should be absent but were written: {removed & written}"
     )
 
 
@@ -174,7 +199,7 @@ def test_every_map_file_starts_with_banner(populated_project: Path):
 
 def test_every_context_file_starts_with_banner(populated_project: Path):
     cmd_render(_args(populated_project))
-    for ctx_path in _context_dir(populated_project).glob("*.md"):
+    for ctx_path in _context_dir(populated_project).rglob("*.md"):
         first_line = ctx_path.read_text(encoding="utf-8").splitlines()[0]
         assert first_line == BANNER, (
             f"{ctx_path.name} first line is {first_line!r}, expected banner"
@@ -182,280 +207,146 @@ def test_every_context_file_starts_with_banner(populated_project: Path):
 
 
 # ---------------------------------------------------------------------------
-# symbols.md: rows sorted by (file path, line)
+# Per-file context granularity
 # ---------------------------------------------------------------------------
 
 
-def test_symbols_md_sorted_by_file_then_line(project: Path):
-    """Rows must come out sorted by file path, then by line within each file."""
+def test_large_file_gets_own_context_page(project: Path):
+    """A file with >= CONTEXT_SYMBOL_THRESHOLD symbols gets context/<rel-path>.md."""
+    from codeatlas.explore_codebase.render import CONTEXT_SYMBOL_THRESHOLD
+
     conn = _open_db(project)
     try:
-        # Out-of-order inserts to verify SORT not insertion order.
-        f_z = _insert_file(conn, "z/last.py")
-        f_a = _insert_file(conn, "a/first.py")
-        # Within a file, deliberately insert later line first.
-        _insert_symbol(conn, f_z, "z_late", "function", line=99)
-        _insert_symbol(conn, f_z, "z_early", "function", line=1)
-        _insert_symbol(conn, f_a, "a_late", "function", line=42)
-        _insert_symbol(conn, f_a, "a_early", "function", line=1)
+        f_big = _insert_file(conn, "pkg/big_module.py")
+        _insert_many_symbols(conn, f_big, CONTEXT_SYMBOL_THRESHOLD)
     finally:
         conn.close()
 
     cmd_render(_args(project))
-    body = (_maps_dir(project) / "symbols.md").read_text(encoding="utf-8")
-
-    # All four names should appear; order check via index-of.
-    idx_a_early = body.find("a_early")
-    idx_a_late = body.find("a_late")
-    idx_z_early = body.find("z_early")
-    idx_z_late = body.find("z_late")
-    assert -1 not in (idx_a_early, idx_a_late, idx_z_early, idx_z_late), (
-        "all four symbols must appear in symbols.md"
-    )
-    assert idx_a_early < idx_a_late < idx_z_early < idx_z_late, (
-        "symbols must be sorted by file path, then line"
+    ctx = _context_dir(project)
+    # Mirrored path: pkg/big_module.py → pkg/big_module.md
+    assert (ctx / "pkg" / "big_module.md").exists(), (
+        "large file must produce context/pkg/big_module.md"
     )
 
 
-# ---------------------------------------------------------------------------
-# callgraph.md: only kind='calls' edges
-# ---------------------------------------------------------------------------
+def test_small_file_folds_into_module_rollup(project: Path):
+    """A file with < CONTEXT_SYMBOL_THRESHOLD symbols folds into _module.md."""
+    from codeatlas.explore_codebase.render import CONTEXT_SYMBOL_THRESHOLD
 
-
-def test_callgraph_md_contains_only_calls_edges(project: Path):
-    """Symbols joined by an 'imports' or 'inherits' edge must NOT appear in callgraph.md."""
     conn = _open_db(project)
     try:
-        f_a = _insert_file(conn, "a.py")
-        f_b = _insert_file(conn, "b.py")
-        s_caller = _insert_symbol(conn, f_a, "caller_fn", "function", line=10)
-        s_callee = _insert_symbol(conn, f_b, "callee_fn", "function", line=20)
-        s_importer = _insert_symbol(conn, f_a, "import_only_fn", "function", line=30)
-        s_imported = _insert_symbol(conn, f_b, "imported_only_fn", "function", line=40)
-
-        _insert_edge(conn, s_caller, s_callee, "calls")
-        # imports edge: must NOT show up in callgraph.md
-        _insert_edge(conn, s_importer, s_imported, "imports")
+        f_small = _insert_file(conn, "pkg/small_module.py")
+        _insert_many_symbols(conn, f_small, CONTEXT_SYMBOL_THRESHOLD - 1)
     finally:
         conn.close()
 
     cmd_render(_args(project))
-    body = (_maps_dir(project) / "callgraph.md").read_text(encoding="utf-8")
-
-    assert "caller_fn" in body
-    assert "callee_fn" in body
-    # The import-only pair must not leak into the callgraph map.
-    assert "import_only_fn" not in body
-    assert "imported_only_fn" not in body
-
-
-def test_callgraph_md_grouped_by_caller_file(project: Path):
-    """callgraph.md is an adjacency list grouped by caller file path."""
-    conn = _open_db(project)
-    try:
-        f_a = _insert_file(conn, "module_alpha/main.py")
-        f_b = _insert_file(conn, "module_beta/util.py")
-        s_a = _insert_symbol(conn, f_a, "a_caller", "function", line=10)
-        s_b = _insert_symbol(conn, f_b, "b_callee", "function", line=20)
-        _insert_edge(conn, s_a, s_b, "calls")
-    finally:
-        conn.close()
-
-    cmd_render(_args(project))
-    body = (_maps_dir(project) / "callgraph.md").read_text(encoding="utf-8")
-
-    # Caller file path appears as a heading or grouping marker before the
-    # caller/callee names.
-    caller_path_idx = body.find("module_alpha/main.py")
-    caller_idx = body.find("a_caller")
-    callee_idx = body.find("b_callee")
-    assert caller_path_idx != -1, "caller file path should be present in callgraph.md"
-    assert caller_idx != -1
-    assert callee_idx != -1
-    assert caller_path_idx < caller_idx, "caller file path should precede caller name"
-
-
-# ---------------------------------------------------------------------------
-# imports.md: only kind='imports' edges
-# ---------------------------------------------------------------------------
-
-
-def test_imports_md_contains_only_imports_edges(project: Path):
-    conn = _open_db(project)
-    try:
-        f_a = _insert_file(conn, "a.py")
-        f_b = _insert_file(conn, "b.py")
-        s_call_src = _insert_symbol(conn, f_a, "call_only_src", "function", line=1)
-        s_call_dst = _insert_symbol(conn, f_b, "call_only_dst", "function", line=2)
-        s_imp_src = _insert_symbol(conn, f_a, "imp_src", "function", line=3)
-        s_imp_dst = _insert_symbol(conn, f_b, "imp_dst", "function", line=4)
-
-        _insert_edge(conn, s_call_src, s_call_dst, "calls")
-        _insert_edge(conn, s_imp_src, s_imp_dst, "imports")
-    finally:
-        conn.close()
-
-    cmd_render(_args(project))
-    body = (_maps_dir(project) / "imports.md").read_text(encoding="utf-8")
-
-    assert "imp_src" in body
-    assert "imp_dst" in body
-    # call-only names must not leak in.
-    assert "call_only_src" not in body
-    assert "call_only_dst" not in body
-
-
-def test_imports_md_grouped_by_importer_file(project: Path):
-    conn = _open_db(project)
-    try:
-        f_a = _insert_file(conn, "module_alpha/main.py")
-        f_b = _insert_file(conn, "module_beta/util.py")
-        s_a = _insert_symbol(conn, f_a, "a_importer", "function", line=10)
-        s_b = _insert_symbol(conn, f_b, "b_imported", "function", line=20)
-        _insert_edge(conn, s_a, s_b, "imports")
-    finally:
-        conn.close()
-
-    cmd_render(_args(project))
-    body = (_maps_dir(project) / "imports.md").read_text(encoding="utf-8")
-
-    importer_path_idx = body.find("module_alpha/main.py")
-    importer_idx = body.find("a_importer")
-    assert importer_path_idx != -1, "importer file path should appear"
-    assert importer_idx != -1
-    assert importer_path_idx < importer_idx
-
-
-# ---------------------------------------------------------------------------
-# dead-code.md: only function/class symbols with no incoming kind='calls' edges
-# ---------------------------------------------------------------------------
-
-
-def test_dead_code_md_lists_only_unreferenced_callables(project: Path):
-    """A function with an incoming 'calls' edge is NOT dead.
-
-    A function with only an 'imports' edge into it IS still dead (the rule is
-    'no incoming calls'). A class without any incoming calls IS dead.
-    """
-    conn = _open_db(project)
-    try:
-        f_a = _insert_file(conn, "a.py")
-        f_b = _insert_file(conn, "b.py")
-        # called by something — NOT dead
-        s_called = _insert_symbol(conn, f_a, "called_fn", "function", line=1)
-        # never called — dead. Variables not consumed downstream because the
-        # behaviour we assert on is presence in the rendered output.
-        _insert_symbol(conn, f_a, "orphan_fn", "function", line=2)
-        # class with no incoming calls — dead
-        _insert_symbol(conn, f_a, "OrphanCls", "class", line=3)
-        # imported but never called — still dead (rule is 'no incoming calls')
-        s_only_imported = _insert_symbol(
-            conn, f_a, "only_imported_fn", "function", line=4
-        )
-        s_caller = _insert_symbol(conn, f_b, "caller_fn", "function", line=5)
-        s_importer = _insert_symbol(conn, f_b, "imp_src", "function", line=6)
-
-        _insert_edge(conn, s_caller, s_called, "calls")
-        _insert_edge(conn, s_importer, s_only_imported, "imports")
-    finally:
-        conn.close()
-
-    cmd_render(_args(project))
-    body = (_maps_dir(project) / "dead-code.md").read_text(encoding="utf-8")
-
-    assert "orphan_fn" in body, "uncalled function must appear in dead-code"
-    assert "OrphanCls" in body, "uncalled class must appear in dead-code"
-    assert "only_imported_fn" in body, (
-        "imported-but-uncalled function must appear in dead-code"
+    ctx = _context_dir(project)
+    assert (ctx / "pkg" / "_module.md").exists(), (
+        "small file must produce context/pkg/_module.md"
     )
-    assert "called_fn" not in body, "called function must NOT appear in dead-code"
-
-
-def test_dead_code_md_excludes_non_callables(project: Path):
-    """Variables and attributes are not considered for dead-code (callables only)."""
-    conn = _open_db(project)
-    try:
-        f_a = _insert_file(conn, "a.py")
-        # variable with no incoming edges — must NOT appear in dead-code
-        _insert_symbol(conn, f_a, "UNUSED_CONST", "variable", line=1)
-        _insert_symbol(conn, f_a, "unused_attr", "attribute", line=2)
-    finally:
-        conn.close()
-
-    cmd_render(_args(project))
-    body = (_maps_dir(project) / "dead-code.md").read_text(encoding="utf-8")
-
-    assert "UNUSED_CONST" not in body
-    assert "unused_attr" not in body
-
-
-# ---------------------------------------------------------------------------
-# context/ directory: one file per top-level module
-# ---------------------------------------------------------------------------
-
-
-def test_context_dir_created_with_one_file_per_top_level_module(
-    populated_project: Path,
-):
-    """context/ contains one .md per top-level dir (pkg_a, pkg_b)."""
-    cmd_render(_args(populated_project))
-    ctx_dir = _context_dir(populated_project)
-    assert ctx_dir.is_dir()
-
-    ctx_files = {p.stem for p in ctx_dir.glob("*.md")}
-    assert "pkg_a" in ctx_files
-    assert "pkg_b" in ctx_files
-
-
-def test_context_files_contain_their_module_files(populated_project: Path):
-    """Each context file lists its own module's files in its Files section.
-
-    Cross-module file paths may legitimately appear in the Outgoing Edges section
-    (showing where this module reaches into others) — so we only check that
-    a sibling module's files don't sneak into the Files header section.
-    """
-    cmd_render(_args(populated_project))
-    pkg_a_body = (_context_dir(populated_project) / "pkg_a.md").read_text(
-        encoding="utf-8"
-    )
-    pkg_b_body = (_context_dir(populated_project) / "pkg_b.md").read_text(
-        encoding="utf-8"
+    assert not (ctx / "pkg" / "small_module.md").exists(), (
+        "small file must NOT get its own context page"
     )
 
-    # Each module's own files appear in its context.
-    assert "pkg_a/alpha.py" in pkg_a_body
-    assert "pkg_a/beta.py" in pkg_a_body
-    assert "pkg_b/gamma.py" in pkg_b_body
 
-    # Strict check: a sibling's files are not listed in the Files section.
-    pkg_a_files_section = _section(pkg_a_body, "## Files", "## Symbols")
-    pkg_b_files_section = _section(pkg_b_body, "## Files", "## Symbols")
-    assert "pkg_b/gamma.py" not in pkg_a_files_section
-    assert "pkg_a/alpha.py" not in pkg_b_files_section
-    assert "pkg_a/beta.py" not in pkg_b_files_section
+def test_small_file_content_appears_in_rollup(project: Path):
+    """Symbols from a small file appear in the parent _module.md rollup."""
+    from codeatlas.explore_codebase.render import CONTEXT_SYMBOL_THRESHOLD
 
+    conn = _open_db(project)
+    try:
+        f_small = _insert_file(conn, "pkg/utils.py")
+        _insert_symbol(conn, f_small, "helper_fn", "function", line=1)
+        # Only 1 symbol — well below threshold.
+        assert CONTEXT_SYMBOL_THRESHOLD > 1
+    finally:
+        conn.close()
 
-# ---------------------------------------------------------------------------
-# callgraph.md and imports.md: placeholder text when no edges exist
-# ---------------------------------------------------------------------------
-
-
-def test_callgraph_md_placeholder_when_no_edges(project: Path):
-    """With no 'calls' edges in the DB, callgraph.md renders a placeholder line."""
     cmd_render(_args(project))
-    body = (_maps_dir(project) / "callgraph.md").read_text(encoding="utf-8")
-    assert "_No call edges recorded._" in body
+    rollup = _context_dir(project) / "pkg" / "_module.md"
+    assert rollup.exists()
+    body = rollup.read_text(encoding="utf-8")
+    assert "helper_fn" in body
+    assert "pkg/utils.py" in body
 
 
-def test_imports_md_placeholder_when_no_edges(project: Path):
-    """With no 'imports' edges in the DB, imports.md renders a placeholder line."""
+def test_large_file_content_appears_in_own_context_page(project: Path):
+    """Symbols from a large file appear in its own context/<rel-path>.md."""
+    from codeatlas.explore_codebase.render import CONTEXT_SYMBOL_THRESHOLD
+
+    conn = _open_db(project)
+    try:
+        f_big = _insert_file(conn, "svc/engine.py")
+        _insert_many_symbols(conn, f_big, CONTEXT_SYMBOL_THRESHOLD, prefix="eng")
+    finally:
+        conn.close()
+
     cmd_render(_args(project))
-    body = (_maps_dir(project) / "imports.md").read_text(encoding="utf-8")
-    assert "_No import edges recorded._" in body
+    ctx_page = _context_dir(project) / "svc" / "engine.md"
+    assert ctx_page.exists()
+    body = ctx_page.read_text(encoding="utf-8")
+    assert "eng_0" in body
+
+
+def test_mixed_large_and_small_files_in_same_dir(project: Path):
+    """One large + one small file in same dir → own page + rollup, both present."""
+    from codeatlas.explore_codebase.render import CONTEXT_SYMBOL_THRESHOLD
+
+    conn = _open_db(project)
+    try:
+        f_big = _insert_file(conn, "pkg/big.py")
+        f_small = _insert_file(conn, "pkg/small.py")
+        _insert_many_symbols(conn, f_big, CONTEXT_SYMBOL_THRESHOLD)
+        _insert_symbol(conn, f_small, "tiny_fn", "function", line=1)
+    finally:
+        conn.close()
+
+    cmd_render(_args(project))
+    ctx = _context_dir(project)
+    assert (ctx / "pkg" / "big.md").exists(), "large file must have own page"
+    assert (ctx / "pkg" / "_module.md").exists(), "small file must fold into rollup"
+
+
+def test_context_page_mirrors_nested_path(project: Path):
+    """Deep paths are mirrored: src/pkg/sub/mod.py → context/src/pkg/sub/mod.md."""
+    from codeatlas.explore_codebase.render import CONTEXT_SYMBOL_THRESHOLD
+
+    conn = _open_db(project)
+    try:
+        f = _insert_file(conn, "src/pkg/sub/mod.py")
+        _insert_many_symbols(conn, f, CONTEXT_SYMBOL_THRESHOLD)
+    finally:
+        conn.close()
+
+    cmd_render(_args(project))
+    assert (_context_dir(project) / "src" / "pkg" / "sub" / "mod.md").exists()
 
 
 # ---------------------------------------------------------------------------
-# Empty DB: still writes all files, no crash
+# Context: root-level files are skipped
+# ---------------------------------------------------------------------------
+
+
+def test_top_level_files_dont_create_context_page(project: Path):
+    """A file with no directory segment produces no context/ page of any kind."""
+    conn = _open_db(project)
+    try:
+        f_root = _insert_file(conn, "top.py")
+        _insert_symbol(conn, f_root, "top_fn", "function", line=1)
+    finally:
+        conn.close()
+
+    cmd_render(_args(project))
+    ctx_files = list(_context_dir(project).rglob("*.md"))
+    assert ctx_files == [], (
+        f"top-level files must not produce context pages, got: {ctx_files}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Empty DB
 # ---------------------------------------------------------------------------
 
 
@@ -471,9 +362,9 @@ def test_render_on_empty_db_writes_all_files(project: Path):
 
 
 def test_render_on_empty_db_creates_no_context_files(project: Path):
-    """No tracked files → no top-level modules → no context/<module>.md files."""
+    """No tracked files → no context files."""
     cmd_render(_args(project))
-    ctx_files = list(_context_dir(project).glob("*.md"))
+    ctx_files = list(_context_dir(project).rglob("*.md"))
     assert ctx_files == [], (
         f"empty DB should produce no context files, got: {ctx_files}"
     )
@@ -486,18 +377,15 @@ def test_render_on_empty_db_creates_no_context_files(project: Path):
 
 def test_render_twice_overwrites_does_not_append(populated_project: Path):
     cmd_render(_args(populated_project))
-    first_size = (_maps_dir(populated_project) / "symbols.md").stat().st_size
-    first_body = (_maps_dir(populated_project) / "symbols.md").read_text(
+    first_body = (_maps_dir(populated_project) / "architecture.md").read_text(
         encoding="utf-8"
     )
 
     cmd_render(_args(populated_project))
-    second_size = (_maps_dir(populated_project) / "symbols.md").stat().st_size
-    second_body = (_maps_dir(populated_project) / "symbols.md").read_text(
+    second_body = (_maps_dir(populated_project) / "architecture.md").read_text(
         encoding="utf-8"
     )
 
-    assert first_size == second_size, "render must be idempotent: same input, same size"
     assert first_body == second_body, "render must be idempotent: same input, same body"
 
 
@@ -505,7 +393,9 @@ def test_render_twice_only_one_banner_per_file(populated_project: Path):
     """Banner must NOT accumulate across runs."""
     cmd_render(_args(populated_project))
     cmd_render(_args(populated_project))
-    body = (_maps_dir(populated_project) / "symbols.md").read_text(encoding="utf-8")
+    body = (_maps_dir(populated_project) / "architecture.md").read_text(
+        encoding="utf-8"
+    )
     assert body.count(BANNER) == 1, "banner duplicated across renders → appending bug"
 
 
@@ -524,8 +414,7 @@ def test_render_creates_maps_dir_if_absent(project: Path):
     rc = cmd_render(_args(project))
     assert rc == 0
     assert maps.is_dir()
-    # And the files are still written.
-    assert (maps / "symbols.md").exists()
+    assert (maps / "architecture.md").exists()
 
 
 def test_render_creates_context_dir_if_absent(populated_project: Path):
@@ -549,15 +438,6 @@ def test_render_prints_one_written_line_per_map_file(populated_project: Path, ca
     for fname in EXPECTED_MAP_FILES:
         expected_line = f"Written: .claude/codeatlas/maps/{fname}"
         assert expected_line in out, f"missing stdout line for {fname}"
-
-
-def test_render_prints_one_written_line_per_context_file(
-    populated_project: Path, capsys
-):
-    cmd_render(_args(populated_project))
-    out = capsys.readouterr().out
-    assert "Written: .claude/codeatlas/context/pkg_a.md" in out
-    assert "Written: .claude/codeatlas/context/pkg_b.md" in out
 
 
 # ---------------------------------------------------------------------------
@@ -589,32 +469,20 @@ def test_data_md_lists_data_kinds(project: Path):
     assert "validate" not in body
 
 
-def test_top_level_files_dont_create_context_module(project: Path):
-    """A file with no directory segment (root-level) is not bucketed into context/."""
-    conn = _open_db(project)
-    try:
-        f_root = _insert_file(conn, "top.py")
-        _insert_symbol(conn, f_root, "top_fn", "function", line=1)
-    finally:
-        conn.close()
-
-    cmd_render(_args(project))
-    ctx_files = list(_context_dir(project).glob("*.md"))
-    assert ctx_files == [], (
-        f"top-level files must not produce context/<module>.md, got: {ctx_files}"
-    )
-
-
 def test_context_with_files_but_no_symbols_renders_placeholder(project: Path):
     """Module that has tracked files but zero parsed symbols still renders cleanly."""
     conn = _open_db(project)
     try:
+        # 0 symbols → folds into _module.md rollup (0 < threshold).
         _insert_file(conn, "empty_module/placeholder.py")
     finally:
         conn.close()
 
     cmd_render(_args(project))
-    body = (_context_dir(project) / "empty_module.md").read_text(encoding="utf-8")
+    # 0 symbols is below threshold → rollup page.
+    rollup = _context_dir(project) / "empty_module" / "_module.md"
+    assert rollup.exists()
+    body = rollup.read_text(encoding="utf-8")
     assert "empty_module/placeholder.py" in body
     assert "_No symbols in this module._" in body
 
@@ -821,7 +689,7 @@ def test_recent_changes_md_lists_changed_files_with_since(project: Path):
     # Inject a fake git_log function that "returns" pkg/changed.py.
     from codeatlas.explore_codebase import render
 
-    fake_git = lambda root, since: ["pkg/changed.py"]  # noqa: E731
+    fake_git = lambda _root, _since: ["pkg/changed.py"]  # noqa: E731
     rc = render.run(
         sqlite3.connect(project / ".claude/codeatlas" / "codebase.db"),
         project,
@@ -845,7 +713,7 @@ def test_recent_changes_md_ignores_files_not_in_db(project: Path):
 
     from codeatlas.explore_codebase import render
 
-    fake_git = lambda root, since: ["tracked.py", "untracked.py"]  # noqa: E731
+    fake_git = lambda _root, _since: ["tracked.py", "untracked.py"]  # noqa: E731
     rc = render.run(
         sqlite3.connect(project / ".claude/codeatlas" / "codebase.db"),
         project,
@@ -866,7 +734,7 @@ def test_recent_changes_md_empty_git_log(project: Path):
     """Doom-path: --since with no matching files → recent-changes renders empty cleanly."""
     from codeatlas.explore_codebase import render
 
-    fake_git = lambda root, since: []  # noqa: E731
+    fake_git = lambda _root, _since: []  # noqa: E731
     rc = render.run(
         sqlite3.connect(project / ".claude/codeatlas" / "codebase.db"),
         project,
@@ -889,8 +757,19 @@ def test_index_md_links_to_all_maps(populated_project: Path):
     """index.md should reference every other generated map by filename."""
     cmd_render(_args(populated_project))
     body = (_maps_dir(populated_project) / "index.md").read_text(encoding="utf-8")
-    for fname in EXPECTED_MAP_FILES | {"impact.md", "recent-changes.md"}:
+    # Prose maps that remain
+    for fname in {
+        "architecture.md",
+        "modules.md",
+        "data.md",
+        "api.md",
+        "impact.md",
+        "recent-changes.md",
+    }:
         assert fname in body, f"index.md missing reference to {fname}"
+    # Removed flat-dump maps must not appear in the index
+    for fname in {"symbols.md", "callgraph.md", "imports.md", "dead-code.md"}:
+        assert fname not in body, f"index.md must not reference removed map {fname}"
 
 
 def test_index_md_contains_stats_block(populated_project: Path):
@@ -908,14 +787,13 @@ def test_index_md_contains_stats_block(populated_project: Path):
     assert "edge" in lower
 
 
-def test_index_md_contains_navigation_hints(populated_project: Path):
-    """index.md should contain prose pointing readers at the right map per use case."""
+def test_index_md_navigation_references_cli_subcommands(populated_project: Path):
+    """index.md navigation hints should mention the new CLI query subcommands."""
     cmd_render(_args(populated_project))
     body = (_maps_dir(populated_project) / "index.md").read_text(encoding="utf-8")
-    # Navigation hints should mention at least two of the maps by name with
-    # a hint about when to use them.
-    assert "callgraph" in body.lower()
-    assert "dead-code" in body.lower() or "dead code" in body.lower()
+    assert "find" in body.lower()
+    assert "callers" in body.lower()
+    assert "callees" in body.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -933,3 +811,47 @@ def test_phase6_files_start_with_banner(populated_project: Path):
         assert first_line == BANNER, (
             f"{fname} first line is {first_line!r}, expected banner"
         )
+
+
+# ---------------------------------------------------------------------------
+# index.md: architecture.md description accuracy
+# ---------------------------------------------------------------------------
+
+
+def test_module_md_collision_with_source_file_named_underscore_module(project: Path):
+    """pkg/_module.py with >= threshold symbols gets its own per-file context page.
+
+    The per-file page (pkg/_module.md) takes the same name as the rollup page
+    that would be created for small files in the pkg/ directory. When the file
+    itself meets the threshold it must produce its own context page; the rollup
+    name collision does not suppress it.
+    """
+    from codeatlas.explore_codebase.render import CONTEXT_SYMBOL_THRESHOLD
+
+    conn = _open_db(project)
+    try:
+        f_underscore = _insert_file(conn, "pkg/_module.py")
+        _insert_many_symbols(conn, f_underscore, CONTEXT_SYMBOL_THRESHOLD)
+    finally:
+        conn.close()
+
+    cmd_render(_args(project))
+    ctx = _context_dir(project)
+    # The file's own context page must exist at the mirrored path.
+    assert (ctx / "pkg" / "_module.md").exists(), (
+        "pkg/_module.py must produce context/pkg/_module.md (per-file page, not suppressed)"
+    )
+
+
+def test_index_md_architecture_description_is_accurate(populated_project: Path):
+    """The description for architecture.md in index.md must reflect actual content.
+
+    The actual _render_architecture output groups source files by top-level
+    module — not a dependency graph. The description must say so.
+    """
+    cmd_render(_args(populated_project))
+    body = (_maps_dir(populated_project) / "index.md").read_text(encoding="utf-8")
+    # The accurate description should mention grouping/files/module — not 'dependency'.
+    assert "Source files grouped by top-level module" in body, (
+        f"architecture.md description in index.md is inaccurate or missing; body:\n{body}"
+    )

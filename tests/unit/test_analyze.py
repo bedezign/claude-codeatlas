@@ -28,14 +28,19 @@ def test_venv_bin_returns_sibling_when_it_exists(tmp_path: Path):
 
 def test_venv_bin_falls_back_to_which_when_sibling_absent(tmp_path: Path):
     with patch("sys.executable", str(tmp_path / "python")):
-        with patch("codeatlas.explore_codebase.analyze.shutil.which", return_value="/usr/bin/pyan3"):
+        with patch(
+            "codeatlas.explore_codebase.analyze.shutil.which",
+            return_value="/usr/bin/pyan3",
+        ):
             result = analyze._venv_bin("pyan3")
     assert result == "/usr/bin/pyan3"
 
 
 def test_venv_bin_returns_bare_name_when_not_found(tmp_path: Path):
     with patch("sys.executable", str(tmp_path / "python")):
-        with patch("codeatlas.explore_codebase.analyze.shutil.which", return_value=None):
+        with patch(
+            "codeatlas.explore_codebase.analyze.shutil.which", return_value=None
+        ):
             result = analyze._venv_bin("pyan3")
     assert result == "pyan3"
 
@@ -86,7 +91,7 @@ def test_analyze_empty_changeset_writes_nothing(conn, project: Path):
     assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0] == 0
-    assert conn.execute("SELECT COUNT(*) FROM dead_code").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM dead_symbols").fetchone()[0] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +147,7 @@ def _completed(stdout: str = "", returncode: int = 0):
 def _stub_tool_chain(ctags_stdout: str = "", **overrides):
     """Build a side_effect routing subprocess.run calls by argv[0]."""
 
-    def fake_run(argv, *args, **kwargs):
+    def fake_run(argv, *_args, **_kwargs):
         tool = Path(argv[0]).name if argv else ""
         if tool == "ctags":
             return _completed(stdout=ctags_stdout)
@@ -350,7 +355,7 @@ def test_pyan3_two_phase_resolves_cross_file_edges(conn, project: Path):
     (project / "a.py").write_text("import b\n\ndef caller():\n    b.callee()\n")
     (project / "b.py").write_text("def callee(): pass\n")
 
-    def fake_run(argv, *args, **kwargs):
+    def fake_run(argv, *_args, **_kwargs):
         tool = Path(argv[0]).name if argv else ""
         if tool == "ctags":
             target = argv[-1]
@@ -382,7 +387,9 @@ def test_pyan3_two_phase_resolves_cross_file_edges(conn, project: Path):
             return _completed(stdout=_pyan_dot_with_call("a", "caller", "b", "callee"))
         return _completed()
 
-    with patch("codeatlas.explore_codebase.analyze.subprocess.run", side_effect=fake_run):
+    with patch(
+        "codeatlas.explore_codebase.analyze.subprocess.run", side_effect=fake_run
+    ):
         analyze.run(conn, project, changed=[], new=["a.py", "b.py"], deleted=[])
 
     edges = conn.execute(
@@ -399,12 +406,14 @@ def test_pyan3_only_runs_for_python_files(conn, project: Path):
 
     seen_tools: list[str] = []
 
-    def fake_run(argv, *args, **kwargs):
+    def fake_run(argv, *_args, **_kwargs):
         tool = Path(argv[0]).name if argv else ""
         seen_tools.append(tool)
         return _completed()
 
-    with patch("codeatlas.explore_codebase.analyze.subprocess.run", side_effect=fake_run):
+    with patch(
+        "codeatlas.explore_codebase.analyze.subprocess.run", side_effect=fake_run
+    ):
         analyze.run(conn, project, changed=[], new=["x.go"], deleted=[])
 
     assert "pyan3" not in seen_tools
@@ -449,7 +458,8 @@ def test_grimp_inserts_import_edges_when_package_resolvable(conn, project: Path)
             side_effect=_stub_tool_chain(ctags_stdout=ctags_out),
         ),
         patch(
-            "codeatlas.explore_codebase.analyze._collect_grimp_imports", return_value=fake_pairs
+            "codeatlas.explore_codebase.analyze._collect_grimp_imports",
+            return_value=fake_pairs,
         ),
     ):
         analyze.run(
@@ -481,7 +491,7 @@ def test_grimp_skipped_when_top_package_undeterminable(conn, project: Path, caps
 
     grimp_called = []
 
-    def fake_collect(*a, **kw):
+    def fake_collect(*_a, **_kw):
         grimp_called.append(True)
         return []
 
@@ -491,7 +501,8 @@ def test_grimp_skipped_when_top_package_undeterminable(conn, project: Path, caps
             side_effect=_stub_tool_chain(ctags_stdout=ctags_out),
         ),
         patch(
-            "codeatlas.explore_codebase.analyze._collect_grimp_imports", side_effect=fake_collect
+            "codeatlas.explore_codebase.analyze._collect_grimp_imports",
+            side_effect=fake_collect,
         ),
     ):
         rc = analyze.run(conn, project, changed=[], new=["loose.py"], deleted=[])
@@ -511,7 +522,7 @@ def test_grimp_missing_module_skipped_gracefully(conn, project: Path, capsys):
         {"_type": "tag", "name": "x", "kind": "function", "line": 1},
     )
 
-    def raise_import(*a, **kw):
+    def raise_import(*_a, **_kw):
         raise ImportError("no grimp")
 
     with (
@@ -520,7 +531,8 @@ def test_grimp_missing_module_skipped_gracefully(conn, project: Path, capsys):
             side_effect=_stub_tool_chain(ctags_stdout=ctags_out),
         ),
         patch(
-            "codeatlas.explore_codebase.analyze._collect_grimp_imports", side_effect=raise_import
+            "codeatlas.explore_codebase.analyze._collect_grimp_imports",
+            side_effect=raise_import,
         ),
     ):
         rc = analyze.run(conn, project, changed=[], new=["src/mypkg/a.py"], deleted=[])
@@ -543,7 +555,7 @@ def _vulture_line(path: str, line: int, kind: str, name: str, conf: int) -> str:
     return f"{path}:{line}: unused {kind} '{name}' ({conf}% confidence)"
 
 
-def test_vulture_inserts_dead_code_rows(conn, project: Path):
+def test_vulture_inserts_dead_symbols_rows(conn, project: Path):
     (project / "a.py").write_text("def unused_fn(): pass\n")
     ctags_out = _ctags_output(
         {"_type": "tag", "name": "unused_fn", "kind": "function", "line": 1},
@@ -561,7 +573,7 @@ def test_vulture_inserts_dead_code_rows(conn, project: Path):
         analyze.run(conn, project, changed=[], new=["a.py"], deleted=[])
 
     rows = conn.execute(
-        "SELECT file, line, kind, name, confidence FROM dead_code"
+        "SELECT file, line, kind, name, confidence FROM dead_symbols"
     ).fetchall()
     assert ("a.py", 1, "function", "unused_fn", 90) in rows
 
@@ -589,7 +601,7 @@ def test_vulture_drops_below_80_confidence(conn, project: Path):
     ):
         analyze.run(conn, project, changed=[], new=["a.py"], deleted=[])
 
-    rows = conn.execute("SELECT name, confidence FROM dead_code").fetchall()
+    rows = conn.execute("SELECT name, confidence FROM dead_symbols").fetchall()
     names = {r[0] for r in rows}
     assert "maybe" not in names
     assert "deffo" in names
@@ -610,12 +622,14 @@ def test_vulture_missing_binary_skipped(conn, project: Path):
             raise FileNotFoundError("[Errno 2] no vulture")
         return _completed()
 
-    with patch("codeatlas.explore_codebase.analyze.subprocess.run", side_effect=fake_run):
+    with patch(
+        "codeatlas.explore_codebase.analyze.subprocess.run", side_effect=fake_run
+    ):
         rc = analyze.run(conn, project, changed=[], new=["a.py"], deleted=[])
 
     assert rc == 0
-    # No dead_code rows on missing binary
-    assert conn.execute("SELECT COUNT(*) FROM dead_code").fetchone()[0] == 0
+    # No dead_symbols rows on missing binary
+    assert conn.execute("SELECT COUNT(*) FROM dead_symbols").fetchone()[0] == 0
 
 
 def test_vulture_empty_output_no_rows(conn, project: Path):
@@ -629,7 +643,7 @@ def test_vulture_empty_output_no_rows(conn, project: Path):
     ):
         analyze.run(conn, project, changed=[], new=["a.py"], deleted=[])
 
-    assert conn.execute("SELECT COUNT(*) FROM dead_code").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM dead_symbols").fetchone()[0] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -698,7 +712,9 @@ def test_only_deleted_no_phase2_tools_called(conn, project: Path):
         seen.append(Path(argv[0]).name if argv else "")
         return _completed()
 
-    with patch("codeatlas.explore_codebase.analyze.subprocess.run", side_effect=fake_run):
+    with patch(
+        "codeatlas.explore_codebase.analyze.subprocess.run", side_effect=fake_run
+    ):
         rc = analyze.run(conn, project, changed=[], new=[], deleted=["gone.py"])
 
     assert rc == 0
@@ -916,7 +932,7 @@ def test_vulture_confidence_exactly_80_is_kept(conn, project: Path):
     ):
         analyze.run(conn, project, changed=[], new=["a.py"], deleted=[])
 
-    rows = conn.execute("SELECT name, confidence FROM dead_code").fetchall()
+    rows = conn.execute("SELECT name, confidence FROM dead_symbols").fetchall()
     assert ("boundary", 80) in rows
 
 
@@ -937,7 +953,7 @@ def test_vulture_confidence_79_is_dropped(conn, project: Path):
     ):
         analyze.run(conn, project, changed=[], new=["a.py"], deleted=[])
 
-    assert conn.execute("SELECT COUNT(*) FROM dead_code").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM dead_symbols").fetchone()[0] == 0
 
 
 def test_pyan3_resolves_to_exact_module_not_suffix_match(conn, project: Path):
@@ -982,7 +998,9 @@ def test_pyan3_resolves_to_exact_module_not_suffix_match(conn, project: Path):
             return _completed(stdout=_pyan_dot_with_call("b", "foo", "b", "foo"))
         return _completed()
 
-    with patch("codeatlas.explore_codebase.analyze.subprocess.run", side_effect=fake_run):
+    with patch(
+        "codeatlas.explore_codebase.analyze.subprocess.run", side_effect=fake_run
+    ):
         # IMPORTANT: lib.py is processed first so its symbols get the lower rowid.
         # Without anchoring the LIKE pattern, the resolver returns the first
         # matching row → it would silently bind the edge to lib.py.
@@ -1029,19 +1047,19 @@ def test_pyan3_duplicate_edges_deduplicated(conn, project: Path):
     assert edge_count == 1
 
 
-def test_re_analyze_same_file_clears_old_dead_code(conn, project: Path):
-    """Re-analysing a changed file should not accumulate stale dead_code rows.
+def test_re_analyze_same_file_clears_old_dead_symbols(conn, project: Path):
+    """Re-analysing a changed file should not accumulate stale dead_symbols rows.
 
-    Note: the schema doesn't FK dead_code to files, so we expect the
-    implementation to clear the file's dead_code rows when the files row is
+    Note: the schema doesn't FK dead_symbols to files, so we expect the
+    implementation to clear the file's dead_symbols rows when the files row is
     deleted. This is a contract test against silent stale-data growth.
     """
     (project / "a.py").write_text("def newer(): pass\n")
     file_id = _seed_file_row(conn, "a.py", sha="oldhash")
     _seed_symbol(conn, file_id, "older", kind="function")
-    # Pre-seed a stale dead_code row
+    # Pre-seed a stale dead_symbols row
     conn.execute(
-        "INSERT INTO dead_code (file, line, kind, name, confidence) "
+        "INSERT INTO dead_symbols (file, line, kind, name, confidence) "
         "VALUES (?, ?, ?, ?, ?)",
         ("a.py", 99, "function", "older", 95),
     )
@@ -1056,7 +1074,7 @@ def test_re_analyze_same_file_clears_old_dead_code(conn, project: Path):
     ):
         analyze.run(conn, project, changed=["a.py"], new=[], deleted=[])
 
-    names = {r[0] for r in conn.execute("SELECT name FROM dead_code").fetchall()}
+    names = {r[0] for r in conn.execute("SELECT name FROM dead_symbols").fetchall()}
     assert "older" not in names
 
 
@@ -1102,6 +1120,51 @@ def test_real_grimp_against_real_package(conn, project: Path):
     assert ("src/demopkg/consumer.py", "src/demopkg/core.py") in edges
 
 
+def test_run_emits_summary_line_to_stdout(conn, project: Path, capsys):
+    """run() must emit exactly one summary line to stdout."""
+    import re
+
+    rc = analyze.run(conn, project, changed=[], new=[], deleted=[])
+    assert rc == 0
+    captured = capsys.readouterr()
+    lines = [ln for ln in captured.out.splitlines() if ln.strip()]
+    assert len(lines) == 1, f"expected 1 stdout line, got: {lines!r}"
+    assert re.match(
+        r"^analyze: \d+ files / \d+ symbols / \d+ edges / \d+ dead-symbols in \d+\.\ds$",
+        lines[0],
+    ), f"summary line format mismatch: {lines[0]!r}"
+
+
+def test_run_summary_counts_match_db(conn, project: Path, capsys):
+    """Summary counts reflect actual DB contents after run()."""
+    import re
+
+    (project / "a.py").write_text("def foo():\n    pass\n")
+    ctags_out = _ctags_output(
+        {"_type": "tag", "name": "foo", "kind": "function", "line": 1},
+    )
+    with patch(
+        "codeatlas.explore_codebase.analyze.subprocess.run",
+        side_effect=_stub_tool_chain(ctags_stdout=ctags_out),
+    ):
+        analyze.run(conn, project, changed=[], new=["a.py"], deleted=[])
+
+    captured = capsys.readouterr()
+    line = next(ln for ln in captured.out.splitlines() if ln.startswith("analyze:"))
+    m = re.match(
+        r"^analyze: (\d+) files / (\d+) symbols / (\d+) edges / (\d+) dead-symbols in",
+        line,
+    )
+    assert m, f"summary line format mismatch: {line!r}"
+    assert int(m.group(1)) == conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+    assert int(m.group(2)) == conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    assert int(m.group(3)) == conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+    assert (
+        int(m.group(4))
+        == conn.execute("SELECT COUNT(*) FROM dead_symbols").fetchone()[0]
+    )
+
+
 @pytest.mark.skipif(shutil.which("vulture") is None, reason="vulture not installed")
 def test_real_vulture_against_simple_python_file(conn, project: Path):
     (project / "dead.py").write_text(
@@ -1116,9 +1179,87 @@ def test_real_vulture_against_simple_python_file(conn, project: Path):
     rc = analyze.run(conn, project, changed=[], new=["dead.py"], deleted=[])
     assert rc == 0
 
-    rows = conn.execute("SELECT name, confidence FROM dead_code").fetchall()
+    rows = conn.execute("SELECT name, confidence FROM dead_symbols").fetchall()
     # vulture's confidence for a fully-unused top-level function is ≥ 60.
     # Our pipeline asks for ≥ 80, so the test asserts the floor.
     if rows:
         for name, confidence in rows:
             assert confidence >= 80, f"{name} stored at confidence {confidence}"
+
+
+# ---------------------------------------------------------------------------
+# Section 2: line_end and loc columns
+# ---------------------------------------------------------------------------
+
+
+def test_ctags_with_end_field_populates_line_end_and_loc(conn, project: Path):
+    """A tag with 'end' field stores line_end and computes loc."""
+    (project / "a.py").write_text("def foo():\n    pass\n\ndef bar():\n    pass\n")
+
+    # Universal ctags emits 'end' when --fields=+e is set.
+    ctags_out = _ctags_output(
+        {"_type": "tag", "name": "foo", "kind": "function", "line": 1, "end": 2},
+        {"_type": "tag", "name": "bar", "kind": "function", "line": 4, "end": 5},
+    )
+    with patch(
+        "codeatlas.explore_codebase.analyze.subprocess.run",
+        side_effect=_stub_tool_chain(ctags_stdout=ctags_out),
+    ):
+        analyze.run(conn, project, changed=[], new=["a.py"], deleted=[])
+
+    rows = {
+        r[0]: (r[1], r[2])
+        for r in conn.execute("SELECT name, line_end, loc FROM symbols").fetchall()
+    }
+    assert rows["foo"] == (2, 2), (
+        f"foo: expected (line_end=2, loc=2), got {rows['foo']}"
+    )
+    assert rows["bar"] == (5, 2), (
+        f"bar: expected (line_end=5, loc=2), got {rows['bar']}"
+    )
+
+
+def test_ctags_without_end_field_stores_null_line_end_and_loc(conn, project: Path):
+    """A tag without 'end' field stores NULL for both line_end and loc."""
+    (project / "a.py").write_text("def foo(): pass\n")
+
+    # No 'end' field — some kinds don't receive it.
+    ctags_out = _ctags_output(
+        {"_type": "tag", "name": "foo", "kind": "function", "line": 1},
+    )
+    with patch(
+        "codeatlas.explore_codebase.analyze.subprocess.run",
+        side_effect=_stub_tool_chain(ctags_stdout=ctags_out),
+    ):
+        analyze.run(conn, project, changed=[], new=["a.py"], deleted=[])
+
+    row = conn.execute(
+        "SELECT line_end, loc FROM symbols WHERE name = 'foo'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] is None, f"expected NULL line_end, got {row[0]}"
+    assert row[1] is None, f"expected NULL loc, got {row[1]}"
+
+
+def test_ctags_args_include_end_field_flag(project: Path):
+    """ctags must be invoked with --fields=+ne (end-line field enabled)."""
+    seen_args: list[list[str]] = []
+
+    def fake_run(argv, *_args, **_kwargs):
+        seen_args.append(list(argv))
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+    (project / "a.py").write_text("def foo(): pass\n")
+    db_path = project / ".claude/codeatlas/codebase.db"
+    c = db.init(db_path)
+    with patch(
+        "codeatlas.explore_codebase.analyze.subprocess.run", side_effect=fake_run
+    ):
+        analyze.run(c, project, changed=[], new=["a.py"], deleted=[])
+    c.close()
+
+    ctags_calls = [args for args in seen_args if args and Path(args[0]).name == "ctags"]
+    assert ctags_calls, "ctags was not called"
+    assert any("--fields=+ne" in args for args in ctags_calls), (
+        f"--fields=+ne missing from ctags args: {ctags_calls}"
+    )

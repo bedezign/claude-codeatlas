@@ -6,7 +6,7 @@
 explore-codebase <subcommand> [options]
 ```
 
-Available subcommands: `init`, `analyze`, `narrative`, `render`, `cleanup`, `activate`
+Available subcommands: `init`, `analyze`, `narrative`, `render`, `cleanup`, `refresh`, `find`, `callers`, `callees`, `impact`, `summary`, `activate`
 
 Global option: `--project-root <path>` — project root directory (default: current working directory). Accepted by all subcommands.
 
@@ -39,7 +39,7 @@ explore-codebase init | explore-codebase analyze
 
 ### analyze
 
-Runs static analysis tools (`ctags`, `pyan3`, `grimp`, `vulture`) on changed, new, and deleted files. Populates the `files`, `symbols`, `edges`, and `dead_code` tables. Removes DB rows for deleted files. When `--changed`, `--new`, and `--deleted` flags are omitted, reads a JSON changeset from stdin (pipe from `init`).
+Runs static analysis tools (`ctags`, `pyan3`, `grimp`, `vulture`) on changed, new, and deleted files. Populates the `files`, `symbols`, `edges`, and `dead_symbols` tables. Removes DB rows for deleted files. When `--changed`, `--new`, and `--deleted` flags are omitted, reads a JSON changeset from stdin (pipe from `init`).
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
@@ -92,7 +92,7 @@ Stores a prose narrative for a topic in the `narratives` DB table. The narrative
 |-------|-------|
 | `architecture` | High-level system overview across all source files. |
 | `modules` | Per-module roles, responsibilities, and boundaries. |
-| `context/<module>` | One topic per top-level module — purpose, public API, internal dependencies. |
+| `context` | Per-file (≥ `CONTEXT_SYMBOL_THRESHOLD = 15` symbols) or per-directory `_module.md` rollup. Use `--scope <rel-path>` to specify the file or directory. |
 | `data` | Data models, schemas, persistence layer. |
 | `api` | External API surface, endpoints, HTTP routes. |
 | `project-identity` | Project purpose, primary users, entry points. |
@@ -126,7 +126,7 @@ explore-codebase narrative \
 
 Reads the DB and writes all map files under `.claude/codeatlas/maps/` and per-module context pages under `.claude/codeatlas/context/`. Every file starts with a banner warning that hand edits will be overwritten.
 
-Produces the following map files: `architecture.md`, `modules.md`, `symbols.md`, `callgraph.md`, `imports.md`, `dead-code.md`, `data.md`, `api.md`, `impact.md`, `recent-changes.md`, `index.md`.
+Produces the following map files: `architecture.md`, `modules.md`, `data.md`, `api.md`, `impact.md`, `recent-changes.md`, `index.md`. The former flat data-dump maps (`symbols.md`, `callgraph.md`, `imports.md`, `dead-code.md`) are no longer generated; use the `find`, `callers`, `callees`, `impact`, and `summary` subcommands instead.
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
@@ -182,6 +182,61 @@ explore-codebase cleanup --dry-run
 explore-codebase cleanup
 ```
 
+### refresh
+
+Runs `init` and `analyze` in a single step without piping. Equivalent to `explore-codebase init | explore-codebase analyze` but faster and simpler.
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--full` | boolean | `false` | Force full rebuild, ignore cached SHAs. |
+| `--project-root` | path | `.` (cwd) | Project root directory. |
+
+### find
+
+Look up symbols by exact name or substring.
+
+| Argument/Flag | Type | Description |
+|------|------|-------------|
+| `name` | positional | Symbol name to search for. |
+| `--substring` | boolean | Broaden to substring match (SQL LIKE). |
+| `--json` | boolean | Emit JSON instead of text. |
+
+### callers
+
+Show all symbols that call a given symbol name.
+
+| Argument/Flag | Type | Description |
+|------|------|-------------|
+| `symbol` | positional | Symbol name to find callers of. |
+| `--json` | boolean | Emit JSON instead of text. |
+
+### callees
+
+Show all symbols that a given symbol calls.
+
+| Argument/Flag | Type | Description |
+|------|------|-------------|
+| `symbol` | positional | Symbol name to find callees of. |
+| `--json` | boolean | Emit JSON instead of text. |
+
+### impact
+
+BFS blast radius from a file's symbols. Returns files reachable within `--depth` hops.
+
+| Argument/Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `file` | positional | | Project-relative path of the file. |
+| `--depth` | int | `2` | BFS depth (must be ≥ 1). |
+| `--json` | boolean | | Emit JSON instead of text. |
+
+### summary
+
+DB health and statistics: file count, symbol count, edge count, dead-symbol count, narrative count, and last-parsed timestamp.
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` | boolean | Emit JSON instead of text. |
+
 ### activate
 
 Writes a `codeatlas-index.md` rule file to either `~/.claude/rules/` (global) or `.claude/rules/` (project-local). The rule instructs future Claude Code sessions to invoke the explore-codebase skill when asked about codebase structure, rather than reading source files directly.
@@ -228,9 +283,9 @@ explore-codebase activate --project
 
 | Path | Contents |
 |------|----------|
-| `.claude/codeatlas/codebase.db` | SQLite database (WAL mode). Schema versioned; tables for files, symbols, edges, dead_code, narratives, render manifest. |
-| `.claude/codeatlas/maps/` | All rendered map files: `architecture.md`, `modules.md`, `symbols.md`, `callgraph.md`, `imports.md`, `dead-code.md`, `data.md`, `api.md`, `impact.md`, `recent-changes.md`, `index.md`. |
-| `.claude/codeatlas/context/<module>.md` | Per-module context page generated from symbols, edges, and `context/<module>` narrative. One file per top-level module. |
+| `.claude/codeatlas/codebase.db` | SQLite database (WAL mode). Schema versioned; tables for files, symbols, edges, dead_symbols, narratives, render manifest. |
+| `.claude/codeatlas/maps/` | All rendered map files: `architecture.md`, `modules.md`, `data.md`, `api.md`, `impact.md`, `recent-changes.md`, `index.md`. |
+| `.claude/codeatlas/context/` | Per-file context pages (for files with ≥ 15 symbols) and `_module.md` rollups for directories with smaller files. |
 | `.claude/codeatlas/notes/` | Hand-written annotations (never touched by CLI). Use for persistent observations or corrections. |
 
 All generated files start with a banner warning that hand edits will be overwritten on next `render`.

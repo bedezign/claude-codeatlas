@@ -11,6 +11,8 @@ SCHEMA_VERSION = "1"
 logger = logging.getLogger(__name__)
 
 _TABLES = {
+    # meta — generic key/value store.
+    # Known keys: schema_version (str — current schema generation).
     "meta": (
         "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY,value TEXT NOT NULL)"
     ),
@@ -30,7 +32,9 @@ _TABLES = {
         "kind TEXT NOT NULL,"
         "name TEXT NOT NULL,"
         "scope TEXT,"
-        "line INTEGER"
+        "line INTEGER,"
+        "line_end INTEGER,"
+        "loc INTEGER"
         ")"
     ),
     "edges": (
@@ -40,8 +44,9 @@ _TABLES = {
         "kind TEXT NOT NULL"
         ")"
     ),
-    "dead_code": (
-        "CREATE TABLE IF NOT EXISTS dead_code ("
+    # Renamed from dead_code. Stores vulture findings (unused symbols).
+    "dead_symbols": (
+        "CREATE TABLE IF NOT EXISTS dead_symbols ("
         "file TEXT NOT NULL,"
         "line INTEGER,"
         "kind TEXT NOT NULL,"
@@ -49,14 +54,38 @@ _TABLES = {
         "confidence INTEGER NOT NULL"
         ")"
     ),
+    # Composite primary key (topic, scope_id) allows per-file scoped narratives.
+    # scope_id uses '' (empty string sentinel) for single-scope topics like
+    # 'architecture', 'modules', 'data', etc. Never store NULL — SQLite treats
+    # each NULL row as unique in a PRIMARY KEY, making duplicate-prevention impossible.
     "narratives": (
         "CREATE TABLE IF NOT EXISTS narratives ("
-        "topic TEXT PRIMARY KEY,"
+        "topic TEXT NOT NULL,"
+        "scope_id TEXT NOT NULL,"
         "content TEXT NOT NULL,"
         "depends_on TEXT NOT NULL,"
-        "generated_at TEXT NOT NULL"
+        "generated_at TEXT NOT NULL,"
+        "PRIMARY KEY (topic, scope_id)"
         ")"
     ),
+}
+
+# Non-unique indexes created after tables. Keys are index names (used for
+# idempotent IF NOT EXISTS creation), values are CREATE INDEX DDL.
+_INDEXES = {
+    "idx_symbols_name": (
+        "CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name)"
+    ),
+    "idx_symbols_file_id": (
+        "CREATE INDEX IF NOT EXISTS idx_symbols_file_id ON symbols(file_id)"
+    ),
+    "idx_edges_src_id": (
+        "CREATE INDEX IF NOT EXISTS idx_edges_src_id ON edges(src_id)"
+    ),
+    "idx_edges_dst_id": (
+        "CREATE INDEX IF NOT EXISTS idx_edges_dst_id ON edges(dst_id)"
+    ),
+    "idx_edges_kind": ("CREATE INDEX IF NOT EXISTS idx_edges_kind ON edges(kind)"),
 }
 
 
@@ -69,6 +98,7 @@ def _apply_pragmas(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA busy_timeout = 3000")
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")  # noqa: S608
 
 
 def _read_schema_version(conn: sqlite3.Connection) -> str | None:
@@ -93,6 +123,8 @@ def _drop_all_tables(conn: sqlite3.Connection) -> None:
 
 def _create_schema(conn: sqlite3.Connection) -> None:
     for ddl in _TABLES.values():
+        conn.execute(ddl)
+    for ddl in _INDEXES.values():
         conn.execute(ddl)
     conn.execute(
         "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
@@ -128,14 +160,20 @@ def upsert_narrative(
     conn: sqlite3.Connection,
     *,
     topic: str,
+    scope_id: str = "",
     content: str,
     depends_on: str,
     generated_at: str,
 ) -> None:
-    """Insert or replace a narrative row keyed by topic."""
+    """Insert or replace a narrative row keyed by (topic, scope_id).
+
+    scope_id defaults to '' (empty-string sentinel) for single-scope topics
+    such as 'architecture', 'modules', 'data', etc. Pass an explicit
+    scope_id (e.g. 'src/pkg_a') for per-module narratives.
+    """
     conn.execute(
         "INSERT OR REPLACE INTO narratives "
-        "(topic, content, depends_on, generated_at) VALUES (?, ?, ?, ?)",
-        (topic, content, depends_on, generated_at),
+        "(topic, scope_id, content, depends_on, generated_at) VALUES (?, ?, ?, ?, ?)",
+        (topic, scope_id, content, depends_on, generated_at),
     )
     conn.commit()
